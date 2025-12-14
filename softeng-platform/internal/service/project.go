@@ -24,13 +24,13 @@ type ProjectService interface {
 
 // ProjectUploadRequest 项目上传请求
 type ProjectUploadRequest struct {
-	Name        string   `json:"name" binding:"required"`
-	Description string   `json:"description" binding:"required"`
-	Detail      string   `json:"detail" binding:"required"`
-	Github      string   `json:"github"`
-	TechStack   []string `json:"techStack" binding:"required"`
-	Category    string   `json:"catagory" binding:"required"`
-	Images      []string `json:"images"`
+	Name        string   `form:"name" json:"name" binding:"required"`
+	Description string   `form:"description" json:"description" binding:"required"`
+	Detail      string   `form:"detail" json:"detail" binding:"required"`
+	Github      string   `form:"github" json:"github"`
+	TechStack   []string `form:"techStack" json:"techStack" binding:"required"`
+	Category    string   `form:"catagory" json:"catagory" binding:"required"`
+	Images      []string `form:"images" json:"images"`
 }
 
 type projectService struct {

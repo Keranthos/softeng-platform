@@ -28,11 +28,10 @@ func NewUserRepository(db *Database) UserRepository {
 func (r *userRepository) Create(ctx context.Context, user *model.User) error {
 	query := `
 		INSERT INTO users (username, nickname, email, password, avatar, description, face_photo, role, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		RETURNING id
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	err := r.db.QueryRowContext(ctx, query,
+	result, err := r.db.ExecContext(ctx, query,
 		user.Username,
 		user.Nickname,
 		user.Email,
@@ -43,15 +42,23 @@ func (r *userRepository) Create(ctx context.Context, user *model.User) error {
 		user.Role,
 		time.Now(),
 		time.Now(),
-	).Scan(&user.ID)
+	)
+	if err != nil {
+		return err
+	}
 
-	return err
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	user.ID = int(id)
+	return nil
 }
 
 func (r *userRepository) GetByID(ctx context.Context, id int) (*model.User, error) {
 	query := `
 		SELECT id, username, nickname, email, avatar, description, face_photo, role, created_at, updated_at
-		FROM users WHERE id = $1
+		FROM users WHERE id = ?
 	`
 
 	user := &model.User{}
@@ -81,7 +88,7 @@ func (r *userRepository) GetByID(ctx context.Context, id int) (*model.User, erro
 func (r *userRepository) GetByUsername(ctx context.Context, username string) (*model.User, error) {
 	query := `
 		SELECT id, username, nickname, email, password, avatar, description, face_photo, role, created_at, updated_at
-		FROM users WHERE username = $1
+		FROM users WHERE username = ?
 	`
 
 	user := &model.User{}
@@ -112,7 +119,7 @@ func (r *userRepository) GetByUsername(ctx context.Context, username string) (*m
 func (r *userRepository) GetByEmail(ctx context.Context, email string) (*model.User, error) {
 	query := `
 		SELECT id, username, nickname, email, password, avatar, description, face_photo, role, created_at, updated_at
-		FROM users WHERE email = $1
+		FROM users WHERE email = ?
 	`
 
 	user := &model.User{}
@@ -143,8 +150,8 @@ func (r *userRepository) GetByEmail(ctx context.Context, email string) (*model.U
 func (r *userRepository) Update(ctx context.Context, user *model.User) error {
 	query := `
 		UPDATE users 
-		SET nickname = $1, avatar = $2, description = $3, face_photo = $4, updated_at = $5
-		WHERE id = $6
+		SET nickname = ?, avatar = ?, description = ?, face_photo = ?, updated_at = ?
+		WHERE id = ?
 	`
 
 	_, err := r.db.ExecContext(ctx, query,
@@ -160,7 +167,7 @@ func (r *userRepository) Update(ctx context.Context, user *model.User) error {
 }
 
 func (r *userRepository) UpdatePassword(ctx context.Context, userID int, hashedPassword string) error {
-	query := `UPDATE users SET password = $1, updated_at = $2 WHERE id = $3`
+	query := `UPDATE users SET password = ?, updated_at = ? WHERE id = ?`
 	_, err := r.db.ExecContext(ctx, query, hashedPassword, time.Now(), userID)
 	return err
 }

@@ -116,6 +116,12 @@ func (h *ToolHandler) CollectTool(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
 	resourceType := c.Query("resourceType")
+	
+	// resourceType 是必需的query参数
+	if resourceType == "" {
+		response.Error(c, http.StatusBadRequest, "resourceType is required")
+		return
+	}
 
 	result, err := h.toolService.CollectTool(c.Request.Context(), userID, resourceID, resourceType)
 	if err != nil {
@@ -131,6 +137,12 @@ func (h *ToolHandler) UncollectTool(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
 	resourceType := c.Query("resourceType")
+	
+	// resourceType 是必需的query参数
+	if resourceType == "" {
+		response.Error(c, http.StatusBadRequest, "resourceType is required")
+		return
+	}
 
 	result, err := h.toolService.UncollectTool(c.Request.Context(), userID, resourceID, resourceType)
 	if err != nil {
@@ -146,11 +158,18 @@ func (h *ToolHandler) AddComment(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
 	resourceType := c.Query("resourceType")
-
-	var req struct {
-		Content string `json:"content" binding:"required"`
+	
+	// resourceType 是必需的query参数
+	if resourceType == "" {
+		response.Error(c, http.StatusBadRequest, "resourceType is required")
+		return
 	}
 
+	var req struct {
+		Content string `form:"content" json:"content" binding:"required"`
+	}
+
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return
@@ -185,11 +204,18 @@ func (h *ToolHandler) ReplyComment(c *gin.Context) {
 	resourceID := c.Param("resourceId")
 	commentID := c.Param("commentId")
 	resourceType := c.Query("resourceType")
-
-	var req struct {
-		Content string `json:"content" binding:"required"`
+	
+	// resourceType 是必需的query参数
+	if resourceType == "" {
+		response.Error(c, http.StatusBadRequest, "resourceType is required")
+		return
 	}
 
+	var req struct {
+		Content string `form:"content" json:"content" binding:"required"`
+	}
+
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return

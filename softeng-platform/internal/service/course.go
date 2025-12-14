@@ -24,10 +24,10 @@ type CourseService interface {
 
 // CourseUploadRequest 课程资源上传请求
 type CourseUploadRequest struct {
-	File        string   `json:"file"`
-	Resource    string   `json:"resource"`
-	Description string   `json:"description" binding:"required"`
-	Tags        []string `json:"tags"`
+	File        string   `form:"file" json:"file"`
+	Resource    string   `form:"resource" json:"resource"`
+	Description string   `form:"description" json:"description" binding:"required"`
+	Tags        []string `form:"tags" json:"tags"`
 }
 
 type courseService struct {

@@ -67,11 +67,11 @@ func main() {
 		users.GET("/status", userHandler.GetStatus)
 		users.GET("/collection", userHandler.GetCollection)
 		users.POST("/update", userHandler.UpdateProfile)
-		users.DELETE("/collection/:resourceType/:resourceId", userHandler.DeleteCollection)
+		users.DELETE("/collection/:resourceType/:resourceId/", userHandler.DeleteCollection)
 		users.GET("/summit", userHandler.GetSummit)
 		users.PUT("/status/:resourceType/:resourceId/statu", userHandler.UpdateResourceStatus)
 		users.POST("/profile/new_email", userHandler.UpdateEmail)
-		users.POST("/profile/new_password", userHandler.UpdatePassword)
+		users.POST("/profile/new_passward", userHandler.UpdatePassword) // 保持与API文档一致（即使拼写错误）
 	}
 
 	// 工具路由
@@ -135,7 +135,7 @@ func main() {
 	admin.Use(middleware.AdminMiddleware())
 	{
 		admin.GET("/pending", adminHandler.GetPending)
-		admin.GET("/review/:itemId", adminHandler.ReviewItem)
+		admin.POST("/review/:itemId", adminHandler.ReviewItem) // 改为POST方法以支持requestBody
 	}
 
 	// 启动服务器

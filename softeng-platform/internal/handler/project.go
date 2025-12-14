@@ -137,9 +137,10 @@ func (h *ProjectHandler) AddComment(c *gin.Context) {
 	projectID := c.Param("projectId")
 
 	var req struct {
-		Content string `json:"content" binding:"required"`
+		Content string `form:"content" json:"content" binding:"required"`
 	}
 
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return
@@ -175,9 +176,10 @@ func (h *ProjectHandler) ReplyComment(c *gin.Context) {
 	commentID := c.Param("commentId")
 
 	var req struct {
-		Content string `json:"content" binding:"required"`
+		Content string `form:"content" json:"content" binding:"required"`
 	}
 
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return

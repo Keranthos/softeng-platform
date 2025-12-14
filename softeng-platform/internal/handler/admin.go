@@ -38,10 +38,11 @@ func (h *AdminHandler) ReviewItem(c *gin.Context) {
 	itemID := c.Param("itemId")
 
 	var req struct {
-		Action       string `json:"action" binding:"required"`
-		RejectReason string `json:"gejrct_reason"`
+		Action       string `form:"action" json:"action" binding:"required"`
+		RejectReason string `form:"gejrct_reason" json:"gejrct_reason"` // 保持与API文档一致的拼写
 	}
 
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return

@@ -90,10 +90,10 @@ func (s *authService) Login(ctx context.Context, req model.LoginRequest) (*model
 	return user, nil
 }
 
-func (s *authService) ForgotPassword(ctx context.Context, email, newPassword, code string) error {
-	// 验证验证码
-	if !s.validateResetCode(email, code) {
-		return errors.New("invalid reset code")
+func (s *authService) ForgotPassword(ctx context.Context, email, newPassword, certifyPassword string) error {
+	// 验证邀请码（根据API文档，forgot-password使用certify_password作为邀请码）
+	if !s.validateCertifyCode(certifyPassword) {
+		return errors.New("invalid invitation code")
 	}
 
 	// 查找用户

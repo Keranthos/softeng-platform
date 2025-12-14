@@ -71,8 +71,15 @@ func (h *CourseHandler) UploadResource(c *gin.Context) {
 	userID := c.GetInt("userID")
 	courseID := c.Param("courseId")
 	resourceType := c.Query("resourceType")
+	
+	// resourceType 是必需的query参数
+	if resourceType == "" {
+		response.Error(c, http.StatusBadRequest, "resourceType is required")
+		return
+	}
 
 	var req service.CourseUploadRequest
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return
@@ -107,9 +114,10 @@ func (h *CourseHandler) AddComment(c *gin.Context) {
 	courseID := c.Param("courseId")
 
 	var req struct {
-		Content string `json:"content" binding:"required"`
+		Content string `form:"content" json:"content" binding:"required"`
 	}
 
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return
@@ -145,9 +153,10 @@ func (h *CourseHandler) ReplyComment(c *gin.Context) {
 	commentID := c.Param("commentId")
 
 	var req struct {
-		Content string `json:"content" binding:"required"`
+		Content string `form:"content" json:"content" binding:"required"`
 	}
 
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return

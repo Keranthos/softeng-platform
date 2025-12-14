@@ -129,10 +129,11 @@ func (h *UserHandler) UpdateResourceStatus(c *gin.Context) {
 	resourceID := c.Param("resourceId")
 
 	var req struct {
-		Action string `json:"action" binding:"required"`
-		State  string `json:"state"`
+		Action string `form:"action" json:"action" binding:"required"`
+		State  string `form:"state" json:"state"`
 	}
 
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return
@@ -152,12 +153,13 @@ func (h *UserHandler) UpdateEmail(c *gin.Context) {
 	userID := c.GetInt("userID")
 
 	var req struct {
-		Name     string `json:"name" binding:"required"`
-		Password string `json:"password" binding:"required"`
-		NewEmail string `json:"new_email" binding:"required"`
-		Code     string `json:"code" binding:"required"`
+		Name     string `form:"name" json:"name" binding:"required"`
+		Password string `form:"password" json:"password" binding:"required"`
+		NewEmail string `form:"new_email" json:"new_email" binding:"required"`
+		Code     string `form:"code" json:"code" binding:"required"`
 	}
 
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return
@@ -180,12 +182,13 @@ func (h *UserHandler) UpdatePassword(c *gin.Context) {
 	userID := c.GetInt("userID")
 
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		Email       string `json:"email" binding:"required"`
-		NewPassword string `json:"new_passward" binding:"required"`
-		Code        string `json:"code" binding:"required"`
+		Name        string `form:"name" json:"name" binding:"required"`
+		Email       string `form:"email" json:"email" binding:"required"`
+		NewPassword string `form:"new_passward" json:"new_passward" binding:"required"`
+		Code        string `form:"code" json:"code" binding:"required"`
 	}
 
+	// 支持 multipart/form-data 和 application/json
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return

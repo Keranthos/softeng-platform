@@ -23,12 +23,12 @@ type ToolService interface {
 
 // ToolSubmitRequest 工具提交请求结构体
 type ToolSubmitRequest struct {
-	Name              string   `json:"name" binding:"required"`
-	Link              string   `json:"link" binding:"required"`
-	Description       string   `json:"description" binding:"required"`
-	DescriptionDetail string   `json:"description_detail" binding:"required"`
-	Category          string   `json:"catagory" binding:"required"`
-	Tags              []string `json:"tags" binding:"required"`
+	Name              string   `form:"name" json:"name" binding:"required"`
+	Link              string   `form:"link" json:"link" binding:"required"`
+	Description       string   `form:"description" json:"description" binding:"required"`
+	DescriptionDetail string   `form:"description_detail" json:"description_detail" binding:"required"`
+	Category          string   `form:"catagory" json:"catagory" binding:"required"`
+	Tags              []string `form:"tags" json:"tags" binding:"required"`
 }
 
 type toolService struct {
