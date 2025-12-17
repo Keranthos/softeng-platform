@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
 	"softeng-platform/internal/config"
 	"softeng-platform/internal/handler"
 	"softeng-platform/internal/middleware"
 	"softeng-platform/internal/repository"
 	"softeng-platform/internal/service"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/joho/godotenv/autoload"
@@ -21,6 +27,13 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("Error closing database: %v", err)
+		} else {
+			log.Println("Database connection closed")
+		}
+	}()
 
 	// 初始化仓库
 	userRepo := repository.NewUserRepository(db)
@@ -132,13 +145,42 @@ func main() {
 
 	// 管理员路由
 	admin := r.Group("/admin")
-	admin.Use(middleware.AdminMiddleware())
+	admin.Use(middleware.AuthMiddleware()) // 先验证身份
+	admin.Use(middleware.AdminMiddleware()) // 再验证管理员权限
 	{
 		admin.GET("/pending", adminHandler.GetPending)
 		admin.POST("/review/:itemId", adminHandler.ReviewItem) // 改为POST方法以支持requestBody
 	}
 
-	// 启动服务器
-	log.Printf("Server starting on port %s", cfg.Port)
-	r.Run(":" + cfg.Port)
+	// 创建HTTP服务器
+	srv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: r,
+	}
+
+	// 在goroutine中启动服务器
+	go func() {
+		log.Printf("Server starting on port %s", cfg.Port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	// 等待中断信号以优雅地关闭服务器
+	quit := make(chan os.Signal, 1)
+	// 监听 SIGINT 和 SIGTERM 信号
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	// 设置5秒的超时时间用于优雅关闭
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 优雅关闭服务器
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
+	}
+
+	log.Println("Server exited")
 }

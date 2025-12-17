@@ -2,10 +2,24 @@ package utils
 
 import (
 	"softeng-platform/internal/config"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
 )
+
+var (
+	jwtSecret   string
+	jwtSecretOnce sync.Once
+)
+
+// initJWTSecret 初始化JWT密钥，只加载一次
+func initJWTSecret() {
+	jwtSecretOnce.Do(func() {
+		cfg := config.LoadConfig()
+		jwtSecret = cfg.JWTSecret
+	})
+}
 
 type Claims struct {
 	UserID   int    `json:"user_id"`
@@ -15,7 +29,7 @@ type Claims struct {
 }
 
 func GenerateToken(userID int, username, role string) (string, error) {
-	cfg := config.LoadConfig()
+	initJWTSecret()
 
 	claims := Claims{
 		UserID:   userID,
@@ -28,14 +42,14 @@ func GenerateToken(userID int, username, role string) (string, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(cfg.JWTSecret))
+	return token.SignedString([]byte(jwtSecret))
 }
 
 func ValidateToken(tokenString string) (*Claims, error) {
-	cfg := config.LoadConfig()
+	initJWTSecret()
 
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return []byte(cfg.JWTSecret), nil
+		return []byte(jwtSecret), nil
 	})
 
 	if err != nil {
