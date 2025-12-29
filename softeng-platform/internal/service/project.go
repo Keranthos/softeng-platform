@@ -7,14 +7,14 @@ import (
 
 type ProjectService interface {
 	GetProjects(ctx context.Context, category string, techStack []string, sort string, limit int, cursor, resourceType string) (map[string]interface{}, error)
-	GetProject(ctx context.Context, projectID string) (map[string]interface{}, error)
+	GetProject(ctx context.Context, projectID string, userID int) (map[string]interface{}, error)
 	SearchProjects(ctx context.Context, keyword string, category []string, cursor string, limit int) (map[string]interface{}, error)
 	UploadProject(ctx context.Context, userID int, req ProjectUploadRequest) (map[string]interface{}, error)
 	UpdateProject(ctx context.Context, userID int, projectID string, req ProjectUploadRequest) (map[string]interface{}, error)
 	LikeProject(ctx context.Context, userID int, projectID string) (map[string]interface{}, error)
 	UnlikeProject(ctx context.Context, userID int, projectID string) (map[string]interface{}, error)
 	AddComment(ctx context.Context, userID int, projectID, content string) (map[string]interface{}, error)
-	DeleteComment(ctx context.Context, userID int, projectID string) (map[string]interface{}, error)
+	DeleteComment(ctx context.Context, userID int, projectID string, commentID string) (map[string]interface{}, error)
 	ReplyComment(ctx context.Context, userID int, projectID, commentID, content string) (map[string]interface{}, error)
 	DeleteReply(ctx context.Context, userID int, projectID, commentID string) (map[string]interface{}, error)
 	AddView(ctx context.Context, projectID string) (map[string]interface{}, error)
@@ -53,8 +53,8 @@ func (s *projectService) GetProjects(ctx context.Context, category string, techS
 	}, nil
 }
 
-func (s *projectService) GetProject(ctx context.Context, projectID string) (map[string]interface{}, error) {
-	project, err := s.projectRepo.GetByID(ctx, projectID)
+func (s *projectService) GetProject(ctx context.Context, projectID string, userID int) (map[string]interface{}, error) {
+	project, err := s.projectRepo.GetByID(ctx, projectID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -159,8 +159,8 @@ func (s *projectService) AddComment(ctx context.Context, userID int, projectID, 
 	}, nil
 }
 
-func (s *projectService) DeleteComment(ctx context.Context, userID int, projectID string) (map[string]interface{}, error) {
-	comment, err := s.projectRepo.DeleteComment(ctx, userID, projectID)
+func (s *projectService) DeleteComment(ctx context.Context, userID int, projectID string, commentID string) (map[string]interface{}, error) {
+	comment, err := s.projectRepo.DeleteComment(ctx, userID, projectID, commentID)
 	if err != nil {
 		return nil, err
 	}
