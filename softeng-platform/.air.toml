@@ -1,0 +1,74 @@
+# Air configuration file for hot reload
+# Reference: https://github.com/cosmtrek/air
+
+root = "."
+testdata_dir = "testdata"
+tmp_dir = "tmp"
+
+[build]
+  # Just plain old shell command. You could use `make` as well.
+  # Windows需要.exe扩展名
+  # 确保在包含 go.mod 的目录下运行编译命令
+  cmd = "go build -o ./tmp/main.exe ./cmd/server/main.go"
+  # Binary file yields from `cmd`.
+  bin = "./tmp/main.exe"
+  # Watch these filename extensions.
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  # Ignore these filename extensions or directories.
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "node_modules", ".git", "database"]
+  # Watch these directories if you specified.
+  include_dir = []
+  # Watch these files.
+  include_file = []
+  # Exclude files.
+  exclude_file = []
+  # Exclude specific regular expressions.
+  exclude_regex = ["_test.go"]
+  # Exclude unchanged files.
+  exclude_unchanged = false
+  # Follow symlink for directories
+  follow_symlink = false
+  # Poll filesystem for changes instead of using fsnotify
+  poll = false
+  # Poll interval
+  poll_interval = 0
+  # Delay after each executions (milliseconds)
+  delay = 1000
+  # Stop running old binary when build errors occur.
+  stop_on_error = false
+  # This log file places in your tmp_dir.
+  log = "errors.log"
+  # Kill delay (milliseconds) - Windows下可能需要更长时间
+  kill_delay = "0s"
+
+  [build.sanitize_root_path]
+    enable = false
+    components = ["/tmp", "."]
+
+  # Change to the project root directory
+  [build.dir_list]
+    watch = [
+      "cmd",
+      "internal",
+      "pkg",
+    ]
+
+[color]
+  # Customize each part's color. If no color found, use the raw app log.
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"
+
+[log]
+  # Show log time
+  time = false
+
+[misc]
+  # Delete tmp directory on exit
+  clean_on_exit = false
+
+[screen]
+  # Clear screen on each build
+  clear_on_rebuild = false
+

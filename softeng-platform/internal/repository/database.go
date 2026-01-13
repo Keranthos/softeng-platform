@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	_ "github.com/go-sql-driver/mysql" // MySQL驱动
 )
 
 type Database struct {
@@ -30,6 +32,12 @@ func NewDatabase(connectionString string) (*Database, error) {
 
 	if err = db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %v", err)
+	}
+
+	// 设置字符集为 utf8mb4，确保中文显示正常
+	_, err = db.Exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci")
+	if err != nil {
+		log.Printf("Warning: failed to set charset to utf8mb4: %v", err)
 	}
 
 	log.Println("Successfully connected to MySQL database with connection pool configured")

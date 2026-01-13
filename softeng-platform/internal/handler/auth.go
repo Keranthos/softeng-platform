@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"log"
 	"net/http"
 	"softeng-platform/internal/model"
 	"softeng-platform/internal/service"
+	"softeng-platform/internal/utils"
 	"softeng-platform/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -26,9 +28,16 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	token, err := h.authService.Register(c.Request.Context(), req)
+	user, err := h.authService.Register(c.Request.Context(), req)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// 生成JWT token
+	token, err := utils.GenerateToken(user.ID, user.Username, user.Role)
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, "Failed to generate token")
 		return
 	}
 
@@ -47,9 +56,21 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	token, err := h.authService.Login(c.Request.Context(), req)
+	// 添加日志确认使用了新代码
+	log.Printf("Login attempt: username_or_email=%s", req.UsernameOrEmail)
+
+	user, err := h.authService.Login(c.Request.Context(), req)
 	if err != nil {
+		// 添加日志确认错误信息
+		log.Printf("Login error: %v", err)
 		response.Error(c, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	// 生成JWT token
+	token, err := utils.GenerateToken(user.ID, user.Username, user.Role)
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, "Failed to generate token")
 		return
 	}
 
@@ -62,8 +83,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 // ForgotPassword 忘记密码
 func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 	var req struct {
-		Email          string `form:"email" json:"email" binding:"required"`
-		NewPassword    string `form:"new_password" json:"new_password" binding:"required"`
+		Email           string `form:"email" json:"email" binding:"required"`
+		NewPassword     string `form:"new_password" json:"new_password" binding:"required"`
 		CertifyPassword string `form:"certify_password" json:"certify_password" binding:"required"`
 	}
 

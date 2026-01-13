@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"softeng-platform/internal/service"
 	"softeng-platform/pkg/response"
@@ -54,13 +56,26 @@ func (h *ToolHandler) SearchTools(c *gin.Context) {
 func (h *ToolHandler) GetTool(c *gin.Context) {
 	resourceID := c.Param("resourceId")
 	resourceType := c.Query("resourceType")
+	
+	log.Printf("[DEBUG] GetTool called: resourceID=%s, resourceType=%s", resourceID, resourceType)
+	
+	// 获取可选的用户ID（如果用户已登录）
+	userID := 0
+	if uid, exists := c.Get("userID"); exists {
+		if id, ok := uid.(int); ok {
+			userID = id
+		}
+	}
 
-	tool, err := h.toolService.GetTool(c.Request.Context(), resourceID, resourceType)
+	tool, err := h.toolService.GetTool(c.Request.Context(), resourceID, resourceType, userID)
 	if err != nil {
-		response.Error(c, http.StatusNotFound, "Tool not found")
+		// 记录详细错误信息用于调试
+		log.Printf("[DEBUG] GetTool error: resourceID=%s, error=%v", resourceID, err)
+		response.Error(c, http.StatusNotFound, fmt.Sprintf("Tool not found: %v", err))
 		return
 	}
 
+	log.Printf("[DEBUG] GetTool success: resourceID=%s", resourceID)
 	response.Success(c, tool)
 }
 
@@ -69,12 +84,76 @@ func (h *ToolHandler) SubmitTool(c *gin.Context) {
 	userID := c.GetInt("userID")
 
 	var req service.ToolSubmitRequest
+	// 根据 Content-Type 选择绑定方式
+	contentType := c.GetHeader("Content-Type")
+	
+	var bindErr error
+	if contentType == "application/json" {
+		bindErr = c.ShouldBindJSON(&req)
+	} else {
+		// 对于 form 数据，需要手动处理数组字段
+		// 先绑定非数组字段
+		req.Name = c.PostForm("name")
+		req.Link = c.PostForm("link")
+		req.Description = c.PostForm("description")
+		req.DescriptionDetail = c.PostForm("description_detail")
+		req.Category = c.PostForm("catagory")
+		req.ToolType = c.PostForm("type")
+		
+		// 手动获取数组字段
+		req.Tags = c.PostFormArray("tags")
+		req.Images = c.PostFormArray("images")
+		
+		// 验证必填字段
+		if req.Name == "" || req.Link == "" || req.Description == "" || req.DescriptionDetail == "" || req.Category == "" || len(req.Tags) == 0 {
+			log.Printf("[DEBUG] SubmitTool validation failed: Name=%s, Link=%s, Description=%s, DescriptionDetail=%s, Category=%s, Tags=%v", 
+				req.Name, req.Link, req.Description, req.DescriptionDetail, req.Category, req.Tags)
+			response.Error(c, http.StatusBadRequest, "Missing required fields")
+			return
+		}
+	}
+	
+	if bindErr != nil {
+		log.Printf("[DEBUG] SubmitTool binding error: %v", bindErr)
+		log.Printf("[DEBUG] SubmitTool Content-Type: %s", contentType)
+		log.Printf("[DEBUG] SubmitTool userID: %d", userID)
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid request data: %v", bindErr))
+		return
+	}
+
+	// 验证必填字段（JSON 请求）
+	if contentType == "application/json" {
+		if req.Name == "" || req.Link == "" || req.Description == "" || req.DescriptionDetail == "" || req.Category == "" || len(req.Tags) == 0 {
+			log.Printf("[DEBUG] SubmitTool validation failed: Name=%s, Link=%s, Description=%s, DescriptionDetail=%s, Category=%s, Tags=%v", 
+				req.Name, req.Link, req.Description, req.DescriptionDetail, req.Category, req.Tags)
+			response.Error(c, http.StatusBadRequest, "Missing required fields")
+			return
+		}
+	}
+
+	log.Printf("[DEBUG] SubmitTool success: Name=%s, Tags=%v, Images=%v", req.Name, req.Tags, req.Images)
+
+	result, err := h.toolService.SubmitTool(c.Request.Context(), userID, req)
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// UpdateTool 更新工具
+func (h *ToolHandler) UpdateTool(c *gin.Context) {
+	userID := c.GetInt("userID")
+	resourceID := c.Param("resourceId")
+
+	var req service.ToolSubmitRequest
 	if err := c.ShouldBind(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request data")
 		return
 	}
 
-	result, err := h.toolService.SubmitTool(c.Request.Context(), userID, req)
+	result, err := h.toolService.UpdateTool(c.Request.Context(), userID, resourceID, req)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return
@@ -115,12 +194,14 @@ func (h *ToolHandler) UnlikeTool(c *gin.Context) {
 func (h *ToolHandler) CollectTool(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
-	resourceType := c.Query("resourceType")
 	
-	// resourceType 是必需的query参数
+	// resourceType可以从query参数或POST body中获取，如果没有则默认为'tool'
+	resourceType := c.Query("resourceType")
 	if resourceType == "" {
-		response.Error(c, http.StatusBadRequest, "resourceType is required")
-		return
+		resourceType = c.PostForm("resourceType")
+	}
+	if resourceType == "" {
+		resourceType = "tool" // 默认值，因为这是tools路由
 	}
 
 	result, err := h.toolService.CollectTool(c.Request.Context(), userID, resourceID, resourceType)
@@ -136,12 +217,23 @@ func (h *ToolHandler) CollectTool(c *gin.Context) {
 func (h *ToolHandler) UncollectTool(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
-	resourceType := c.Query("resourceType")
 	
-	// resourceType 是必需的query参数
+	// resourceType可以从query参数中获取，如果没有则默认为'tool'
+	// 注意：DELETE请求的body在Gin中较难获取，优先使用query参数
+	resourceType := c.Query("resourceType")
 	if resourceType == "" {
-		response.Error(c, http.StatusBadRequest, "resourceType is required")
-		return
+		// 尝试从request body中获取（某些客户端可能在DELETE body中传递参数）
+		if c.Request.ContentLength > 0 {
+			var body map[string]interface{}
+			if err := c.ShouldBindJSON(&body); err == nil {
+				if rt, ok := body["resourceType"].(string); ok {
+					resourceType = rt
+				}
+			}
+		}
+	}
+	if resourceType == "" {
+		resourceType = "tool" // 默认值
 	}
 
 	result, err := h.toolService.UncollectTool(c.Request.Context(), userID, resourceID, resourceType)
@@ -157,12 +249,14 @@ func (h *ToolHandler) UncollectTool(c *gin.Context) {
 func (h *ToolHandler) AddComment(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
-	resourceType := c.Query("resourceType")
 	
-	// resourceType 是必需的query参数
+	// resourceType可以从query参数或POST body中获取，如果没有则默认为'tool'
+	resourceType := c.Query("resourceType")
 	if resourceType == "" {
-		response.Error(c, http.StatusBadRequest, "resourceType is required")
-		return
+		resourceType = c.PostForm("resourceType")
+	}
+	if resourceType == "" {
+		resourceType = "tool" // 默认值
 	}
 
 	var req struct {
@@ -188,8 +282,39 @@ func (h *ToolHandler) AddComment(c *gin.Context) {
 func (h *ToolHandler) DeleteComment(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
+	commentID := c.Param("commentId")
 
-	result, err := h.toolService.DeleteComment(c.Request.Context(), userID, resourceID)
+	result, err := h.toolService.DeleteComment(c.Request.Context(), userID, resourceID, commentID)
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// GetComments 获取工具评论列表
+func (h *ToolHandler) GetComments(c *gin.Context) {
+	resourceID := c.Param("resourceId")
+	cursor := c.Query("cursor")
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+
+	comments, err := h.toolService.GetComments(c.Request.Context(), resourceID, cursor, limit)
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response.Success(c, comments)
+}
+
+// LikeComment 点赞/取消点赞评论
+func (h *ToolHandler) LikeComment(c *gin.Context) {
+	userID := c.GetInt("userID")
+	resourceID := c.Param("resourceId")
+	commentID := c.Param("commentId")
+
+	result, err := h.toolService.LikeComment(c.Request.Context(), userID, resourceID, commentID)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return
@@ -203,12 +328,14 @@ func (h *ToolHandler) ReplyComment(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
 	commentID := c.Param("commentId")
-	resourceType := c.Query("resourceType")
 	
-	// resourceType 是必需的query参数
+	// resourceType可以从query参数或POST body中获取，如果没有则默认为'tool'
+	resourceType := c.Query("resourceType")
 	if resourceType == "" {
-		response.Error(c, http.StatusBadRequest, "resourceType is required")
-		return
+		resourceType = c.PostForm("resourceType")
+	}
+	if resourceType == "" {
+		resourceType = "tool" // 默认值
 	}
 
 	var req struct {

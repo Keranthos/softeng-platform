@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"softeng-platform/internal/middleware"
 	"softeng-platform/internal/repository"
 	"softeng-platform/internal/service"
+	"softeng-platform/pkg/response"
 	"syscall"
 	"time"
 
@@ -43,7 +45,7 @@ func main() {
 
 	// 初始化服务
 	authService := service.NewAuthService(userRepo)
-	userService := service.NewUserService(userRepo)
+	userService := service.NewUserService(userRepo, toolRepo, projectRepo)
 	toolService := service.NewToolService(toolRepo)
 	courseService := service.NewCourseService(courseRepo)
 	projectService := service.NewProjectService(projectRepo)
@@ -56,12 +58,25 @@ func main() {
 	courseHandler := handler.NewCourseHandler(courseService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	adminHandler := handler.NewAdminHandler(adminService)
+	uploadHandler := handler.NewUploadHandler()
 
 	// 设置路由
 	r := gin.Default()
+	
+	// 强制输出调试信息，确认代码已重新编译
+	log.Println("=== Server starting with updated routes ===")
 
 	// 中间件
 	r.Use(middleware.CORS())
+	
+	// 添加请求日志中间件（用于调试）
+	r.Use(func(c *gin.Context) {
+		log.Printf("[DEBUG] Request: %s %s", c.Request.Method, c.Request.URL.Path)
+		c.Next()
+	})
+
+	// 静态文件服务（图片上传目录）
+	r.Static("/uploads", "./uploads")
 
 	// 认证路由
 	auth := r.Group("/auth")
@@ -90,38 +105,63 @@ func main() {
 	// 工具路由
 	tools := r.Group("/tools")
 	{
-		tools.GET("/profile", toolHandler.GetTools)
-		tools.GET("/search", toolHandler.SearchTools)
-		tools.GET("/:resourceId", toolHandler.GetTool)
-		tools.POST("/submit", middleware.AuthMiddleware(), toolHandler.SubmitTool)
-		tools.POST("/:resourceId/views", toolHandler.AddView)
-		tools.POST("/:resourceId/collections", middleware.AuthMiddleware(), toolHandler.CollectTool)
-		tools.DELETE("/:resourceId/collections", middleware.AuthMiddleware(), toolHandler.UncollectTool)
-		tools.POST("/:resourceId/comments", middleware.AuthMiddleware(), toolHandler.AddComment)
-		tools.DELETE("/:resourceId/comments", middleware.AuthMiddleware(), toolHandler.DeleteComment)
-		tools.POST("/:resourceId/comments/:commentId/reply", middleware.AuthMiddleware(), toolHandler.ReplyComment)
-		tools.DELETE("/:resourceId/comments/:commentId/reply", middleware.AuthMiddleware(), toolHandler.DeleteReply)
-		tools.POST("/:resourceId/like", middleware.AuthMiddleware(), toolHandler.LikeTool)
-		tools.DELETE("/:resourceId/like", middleware.AuthMiddleware(), toolHandler.UnlikeTool)
+		// 具体路由放在前面
+		tools.GET("/profile", toolHandler.GetTools)                                                    // 获取工具列表
+		tools.GET("/search", toolHandler.SearchTools)                                                  // 搜索工具
+		tools.POST("/submit", middleware.AuthMiddleware(), toolHandler.SubmitTool)                    // 提交工具
+		
+		// 更具体的参数路由放在前面
+		tools.GET("/:resourceId/comments", toolHandler.GetComments)                                   // 获取工具评论（新增）
+		tools.POST("/:resourceId/comments", middleware.AuthMiddleware(), toolHandler.AddComment)      // 发表评论
+		tools.DELETE("/:resourceId/comments/:commentId", middleware.AuthMiddleware(), toolHandler.DeleteComment) // 删除评论（修正路径）
+		tools.POST("/:resourceId/comments/:commentId/like", middleware.AuthMiddleware(), toolHandler.LikeComment) // 点赞评论（新增）
+		tools.POST("/:resourceId/comments/:commentId/reply", middleware.AuthMiddleware(), toolHandler.ReplyComment) // 回复评论
+		tools.DELETE("/:resourceId/comments/:commentId/reply", middleware.AuthMiddleware(), toolHandler.DeleteReply) // 删除回复
+		tools.POST("/:resourceId/views", toolHandler.AddView)                                         // 增加浏览量
+		tools.POST("/:resourceId/collections", middleware.AuthMiddleware(), toolHandler.CollectTool)  // 收藏工具
+		tools.DELETE("/:resourceId/collections", middleware.AuthMiddleware(), toolHandler.UncollectTool) // 取消收藏
+		tools.POST("/:resourceId/like", middleware.AuthMiddleware(), toolHandler.LikeTool)            // 点赞工具
+		tools.DELETE("/:resourceId/like", middleware.AuthMiddleware(), toolHandler.UnlikeTool)        // 取消点赞
+		
+		// 最通用的参数路由放在最后
+		tools.GET("/:resourceId", toolHandler.GetTool)                                                 // 获取工具详情
+		tools.PUT("/:resourceId", middleware.AuthMiddleware(), toolHandler.UpdateTool)                // 更新工具
 	}
+	
+	// 添加 NoRoute handler 用于调试
+	r.NoRoute(func(c *gin.Context) {
+		log.Printf("[DEBUG] NoRoute: Method=%s, Path=%s", c.Request.Method, c.Request.URL.Path)
+		response.Error(c, http.StatusNotFound, fmt.Sprintf("Route not found: %s %s", c.Request.Method, c.Request.URL.Path))
+	})
 
-	// 课程路由
-	courses := r.Group("/courses")
+	// 课程路由（使用单数course以匹配前端）
+	course := r.Group("/course")
 	{
-		courses.GET("/profile", courseHandler.GetCourses)
-		courses.GET("/search", courseHandler.SearchCourses)
-		courses.GET("/:courseId", courseHandler.GetCourse)
-		courses.POST("/:courseId/upload", middleware.AuthMiddleware(), courseHandler.UploadResource)
-		courses.GET("/:courseId/textbooks/:textbookId/download", middleware.AuthMiddleware(), courseHandler.DownloadTextbook)
-		courses.POST("/:courseId/comments", middleware.AuthMiddleware(), courseHandler.AddComment)
-		courses.DELETE("/:courseId/comments", middleware.AuthMiddleware(), courseHandler.DeleteComment)
-		courses.POST("/:courseId/comments/:commentId/reply", middleware.AuthMiddleware(), courseHandler.ReplyComment)
-		courses.DELETE("/:courseId/comments/:commentId/reply", middleware.AuthMiddleware(), courseHandler.DeleteReply)
-		courses.POST("/:courseId/view", courseHandler.AddView)
-		courses.POST("/:courseId/collected", middleware.AuthMiddleware(), courseHandler.CollectCourse)
-		courses.DELETE("/:courseId/collected", middleware.AuthMiddleware(), courseHandler.UncollectCourse)
-		courses.POST("/:courseId/like", middleware.AuthMiddleware(), courseHandler.LikeCourse)
-		courses.DELETE("/:courseId/like", middleware.AuthMiddleware(), courseHandler.UnlikeCourse)
+		course.GET("", courseHandler.GetCourses)                         // 获取课程列表
+		course.GET("/search", courseHandler.SearchCourses)               // 搜索课程
+		course.GET("/:courseId", courseHandler.GetCourse)                // 获取课程详情
+		course.POST("/submit", middleware.AuthMiddleware(), courseHandler.SubmitCourse) // 提交课程（新增）
+		course.POST("/:courseId/view", courseHandler.AddView)            // 增加浏览量
+		course.POST("/:courseId/collections", middleware.AuthMiddleware(), courseHandler.CollectCourse) // 收藏课程
+		course.DELETE("/:courseId/collections", middleware.AuthMiddleware(), courseHandler.UncollectCourse) // 取消收藏
+		course.POST("/:courseId/like", middleware.AuthMiddleware(), courseHandler.LikeCourse) // 点赞课程
+		course.DELETE("/:courseId/like", middleware.AuthMiddleware(), courseHandler.UnlikeCourse) // 取消点赞
+		course.GET("/:courseId/comments", courseHandler.GetComments)     // 获取课程评论（新增）
+		course.POST("/:courseId/comments", middleware.AuthMiddleware(), courseHandler.AddComment) // 发表评论
+		course.DELETE("/:courseId/comments/:commentId", middleware.AuthMiddleware(), courseHandler.DeleteComment) // 删除评论
+		course.POST("/:courseId/comments/:commentId/like", middleware.AuthMiddleware(), courseHandler.LikeComment) // 点赞评论（新增）
+		course.POST("/:courseId/comments/:commentId/reply", middleware.AuthMiddleware(), courseHandler.ReplyComment) // 回复评论
+		course.DELETE("/:courseId/comments/:commentId/reply", middleware.AuthMiddleware(), courseHandler.DeleteReply) // 删除回复
+		course.GET("/:courseId/resources", courseHandler.GetResources)   // 获取课程资源（新增）
+		course.POST("/:courseId/resources", middleware.AuthMiddleware(), courseHandler.UploadResource) // 上传资源（改为resources）
+		course.GET("/:courseId/textbooks/:textbookId/download", middleware.AuthMiddleware(), courseHandler.DownloadTextbook) // 下载课本
+		// 以下为前端定义但可能暂时不实现的功能
+		// course.POST("/:courseId/learning-plan", ...) // 加入学习计划
+		// course.DELETE("/:courseId/learning-plan", ...) // 从学习计划移除
+		// course.GET("/:courseId/progress", ...) // 获取学习进度
+		// course.PUT("/:courseId/progress/:chapterId", ...) // 更新学习进度
+		// course.POST("/:courseId/rating", ...) // 添加课程评分
+		// course.POST("/analyze", ...) // 分析课程链接
 	}
 
 	// 项目路由
@@ -134,10 +174,12 @@ func main() {
 		projects.POST("/upload", middleware.AuthMiddleware(), projectHandler.UploadProject)
 		projects.POST("/:projectId/like", middleware.AuthMiddleware(), projectHandler.LikeProject)
 		projects.DELETE("/:projectId/like", middleware.AuthMiddleware(), projectHandler.UnlikeProject)
-		projects.POST("/:projectId/comments", middleware.AuthMiddleware(), projectHandler.AddComment)
-		projects.DELETE("/:projectId/comments", middleware.AuthMiddleware(), projectHandler.DeleteComment)
-		projects.POST("/:projectId/comments/:commentId/reply", middleware.AuthMiddleware(), projectHandler.ReplyComment)
-		projects.DELETE("/:projectId/comments/:commentId/reply", middleware.AuthMiddleware(), projectHandler.DeleteReply)
+		projects.GET("/:projectId/comments", projectHandler.GetComments)                                    // 获取项目评论列表
+		projects.POST("/:projectId/comments", middleware.AuthMiddleware(), projectHandler.AddComment)      // 发表评论
+		projects.DELETE("/:projectId/comments/:commentId", middleware.AuthMiddleware(), projectHandler.DeleteComment) // 删除评论
+		projects.POST("/:projectId/comments/:commentId/like", middleware.AuthMiddleware(), projectHandler.LikeComment) // 点赞评论
+		projects.POST("/:projectId/comments/:commentId/reply", middleware.AuthMiddleware(), projectHandler.ReplyComment) // 回复评论
+		projects.DELETE("/:projectId/comments/:commentId/reply", middleware.AuthMiddleware(), projectHandler.DeleteReply) // 删除回复
 		projects.POST("/:projectId/view", projectHandler.AddView)
 		projects.POST("/:projectId/collected", middleware.AuthMiddleware(), projectHandler.CollectProject)
 		projects.DELETE("/:projectId/collected", middleware.AuthMiddleware(), projectHandler.UncollectProject)
@@ -148,8 +190,17 @@ func main() {
 	admin.Use(middleware.AuthMiddleware()) // 先验证身份
 	admin.Use(middleware.AdminMiddleware()) // 再验证管理员权限
 	{
-		admin.GET("/pending", adminHandler.GetPending)
-		admin.POST("/review/:itemId", adminHandler.ReviewItem) // 改为POST方法以支持requestBody
+		admin.GET("/pending", adminHandler.GetPending)              // 获取待审核内容
+		admin.POST("/review/:itemId", adminHandler.ReviewItem)      // 审核项目（支持POST和GET，前端使用GET但需要requestBody，所以用POST）
+		admin.GET("/review/:itemId", adminHandler.ReviewItem)       // 也支持GET方法（前端调用的是GET）
+	}
+
+	// 上传路由
+	upload := r.Group("/api/upload")
+	upload.Use(middleware.AuthMiddleware()) // 需要登录才能上传
+	{
+		upload.POST("/image", uploadHandler.UploadImage)           // 上传图片文件
+		upload.POST("/process", uploadHandler.ProcessImageURL)    // 处理图片URL（自动本地化）
 	}
 
 	// 创建HTTP服务器
@@ -159,18 +210,40 @@ func main() {
 	}
 
 	// 在goroutine中启动服务器
+	serverError := make(chan error, 1)
 	go func() {
 		log.Printf("Server starting on port %s", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
+			log.Printf("Server error: %v", err)
+			serverError <- err
 		}
 	}()
 
+	// 等待一小段时间确保服务器启动成功
+	time.Sleep(500 * time.Millisecond)
+	
+	// 检查服务器是否成功启动
+	select {
+	case err := <-serverError:
+		log.Fatalf("Failed to start server: %v", err)
+	default:
+		log.Println("Server is running on port", cfg.Port)
+		log.Println("Press Ctrl+C to stop the server")
+	}
+
 	// 等待中断信号以优雅地关闭服务器
 	quit := make(chan os.Signal, 1)
-	// 监听 SIGINT 和 SIGTERM 信号
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	// 监听中断信号（在Windows下使用os.Interrupt，Unix下使用syscall.SIGTERM）
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	
+	// 等待信号或服务器错误
+	select {
+	case sig := <-quit:
+		log.Printf("Received signal: %v", sig)
+	case err := <-serverError:
+		log.Printf("Server error: %v", err)
+	}
+	
 	log.Println("Shutting down server...")
 
 	// 设置5秒的超时时间用于优雅关闭

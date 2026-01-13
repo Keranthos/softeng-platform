@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"softeng-platform/internal/model"
 	"softeng-platform/internal/repository"
 	"softeng-platform/internal/utils"
@@ -71,20 +72,35 @@ func (s *authService) Login(ctx context.Context, req model.LoginRequest) (*model
 	var user *model.User
 	var err error
 
-	// 根据用户名或邮箱查找用户
+	// 根据用户名、邮箱或昵称查找用户
 	if contains(req.UsernameOrEmail, "@") {
+		// 包含@符号，按邮箱查找
 		user, err = s.userRepo.GetByEmail(ctx, req.UsernameOrEmail)
 	} else {
+		// 先按用户名查找
 		user, err = s.userRepo.GetByUsername(ctx, req.UsernameOrEmail)
+		// 如果按用户名找不到，尝试按昵称查找
+		if err == nil && user == nil {
+			user, err = s.userRepo.GetByNickname(ctx, req.UsernameOrEmail)
+		}
 	}
 
-	if err != nil || user == nil {
-		return nil, errors.New("invalid credentials")
+	// 检查是否有数据库错误
+	if err != nil {
+		return nil, fmt.Errorf("数据库查询错误: %v", err)
+	}
+
+	// 检查用户是否存在
+	if user == nil {
+		// 使用中文错误信息，确认后端使用了新代码
+		return nil, errors.New("用户不存在，请检查用户名、昵称或邮箱是否正确")
 	}
 
 	// 验证密码
-	if !utils.CheckPasswordHash(req.Password, user.Password) {
-		return nil, errors.New("invalid credentials")
+	passwordMatch := utils.CheckPasswordHash(req.Password, user.Password)
+	if !passwordMatch {
+		// 使用中文错误信息，确认后端使用了新代码
+		return nil, errors.New("密码错误，请重新输入")
 	}
 
 	return user, nil

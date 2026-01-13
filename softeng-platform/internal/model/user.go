@@ -10,7 +10,7 @@ type User struct {
 	Nickname    string    `json:"nickname" db:"nickname"`
 	Email       string    `json:"email" db:"email"`
 	Password    string    `json:"-" db:"password"`
-	Avatar      string    `json:"avater" db:"avatar"`
+	Avatar      string    `json:"avatar" db:"avatar"` // 修复拼写错误：avater -> avatar
 	Description string    `json:"description" db:"description"`
 	FacePhoto   string    `json:"face_photo" db:"face_photo"`
 	Role        string    `json:"role" db:"role"`
@@ -33,7 +33,7 @@ type LoginRequest struct {
 
 type UpdateProfileRequest struct {
 	Nickname    string `form:"nickname" json:"nickname"`
-	Avatar      string `form:"avater" json:"avater"`
+	Avatar      string `form:"avatar" json:"avatar"`
 	Description string `form:"description" json:"description"`
 	FacePhoto   string `form:"face_photo" json:"face_photo"`
 }

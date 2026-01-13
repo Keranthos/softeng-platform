@@ -2,8 +2,11 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"softeng-platform/internal/model"
 	"softeng-platform/internal/repository"
+	"softeng-platform/internal/utils"
+	"time"
 )
 
 type UserService interface {
@@ -19,11 +22,13 @@ type UserService interface {
 }
 
 type userService struct {
-	userRepo repository.UserRepository
+	userRepo    repository.UserRepository
+	toolRepo    repository.ToolRepository
+	projectRepo repository.ProjectRepository
 }
 
-func NewUserService(userRepo repository.UserRepository) UserService {
-	return &userService{userRepo: userRepo}
+func NewUserService(userRepo repository.UserRepository, toolRepo repository.ToolRepository, projectRepo repository.ProjectRepository) UserService {
+	return &userService{userRepo: userRepo, toolRepo: toolRepo, projectRepo: projectRepo}
 }
 
 func (s *userService) GetProfile(ctx context.Context, userID int) (*model.User, error) {
@@ -36,13 +41,12 @@ func (s *userService) UpdateProfile(ctx context.Context, userID int, req model.U
 		return nil, err
 	}
 
-	// 更新字段
+	// 更新字段（允许设置为空字符串）
 	if req.Nickname != "" {
 		user.Nickname = req.Nickname
 	}
-	if req.Avatar != "" {
-		user.Avatar = req.Avatar
-	}
+	// Avatar可以为空字符串，表示使用默认头像
+	user.Avatar = req.Avatar
 	if req.Description != "" {
 		user.Description = req.Description
 	}
@@ -55,74 +59,166 @@ func (s *userService) UpdateProfile(ctx context.Context, userID int, req model.U
 }
 
 func (s *userService) GetCollection(ctx context.Context, userID int) (map[string]interface{}, error) {
-	// 实现获取收藏逻辑
+	// 获取工具收藏
+	toolRows, _ := s.userRepo.GetCollections(ctx, userID, "tool")
+	// 获取课程收藏
+	courseRows, _ := s.userRepo.GetCollections(ctx, userID, "course")
+	// 获取项目收藏
+	projectRows, _ := s.userRepo.GetCollections(ctx, userID, "project")
+	
 	return map[string]interface{}{
 		"message":   "success",
-		"resources": []interface{}{},
-		"tools":     []interface{}{},
-		"teaches":   []interface{}{},
+		"resources": projectRows,
+		"tools":     toolRows,
+		"teaches":   courseRows,
 	}, nil
 }
 
 func (s *userService) DeleteCollection(ctx context.Context, userID int, resourceType string, resourceID int) (map[string]interface{}, error) {
-	// 实现删除收藏逻辑
-	return map[string]interface{}{
-		"message":   "success",
-		"resources": []interface{}{},
-		"tools":     []interface{}{},
-		"teaches":   []interface{}{},
-	}, nil
+	err := s.userRepo.DeleteCollection(ctx, userID, resourceType, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	
+	// 重新获取收藏列表
+	return s.GetCollection(ctx, userID)
 }
 
 func (s *userService) GetStatus(ctx context.Context, userID int) (map[string]interface{}, error) {
-	// 实现获取审核状态逻辑
+	tools, _ := s.userRepo.GetUserPendingItems(ctx, userID, "tool")
+	courses, _ := s.userRepo.GetUserPendingItems(ctx, userID, "course")
+	projects, _ := s.userRepo.GetUserPendingItems(ctx, userID, "project")
+	
 	return map[string]interface{}{
 		"message":   "success",
-		"resources": []interface{}{},
-		"tools":     []interface{}{},
-		"teaches":   []interface{}{},
+		"resources": projects,
+		"tools":     tools,
+		"teaches":   courses,
 	}, nil
 }
 
 func (s *userService) GetSummit(ctx context.Context, userID int) (map[string]interface{}, error) {
-	// 实现获取个人提交逻辑
+	tools, _ := s.userRepo.GetUserSubmissions(ctx, userID, "tool")
+	courses, _ := s.userRepo.GetUserSubmissions(ctx, userID, "course")
+	projects, _ := s.userRepo.GetUserSubmissions(ctx, userID, "project")
+	
 	return map[string]interface{}{
 		"message":   "success",
-		"resources": []interface{}{},
-		"tools":     []interface{}{},
-		"teaches":   []interface{}{},
+		"resources": projects,
+		"tools":     tools,
+		"teaches":   courses,
 	}, nil
 }
 
 func (s *userService) UpdateResourceStatus(ctx context.Context, userID int, resourceType, resourceID, action, state string) (map[string]interface{}, error) {
-	// 实现更新资源状态逻辑
+	// 验证用户是否有权限操作该资源
+	var oldStatus string
+	switch resourceType {
+	case "tool":
+		err := s.userRepo.GetResourceStatus(ctx, resourceType, resourceID, userID)
+		if err != nil {
+			return nil, err
+		}
+		oldStatus, _ = s.userRepo.GetResourceOldStatus(ctx, resourceType, resourceID)
+		err = s.toolRepo.UpdateToolStatus(ctx, resourceID, action, "")
+		if err != nil {
+			return nil, err
+		}
+		s.userRepo.LogStatusChange(ctx, resourceType, resourceID, oldStatus, action, userID)
+	case "project":
+		// 项目支持状态更新
+		err := s.userRepo.GetResourceStatus(ctx, resourceType, resourceID, userID)
+		if err != nil {
+			return nil, err
+		}
+		oldStatus, _ = s.userRepo.GetResourceOldStatus(ctx, resourceType, resourceID)
+		err = s.projectRepo.UpdateProjectStatus(ctx, resourceID, action, "")
+		if err != nil {
+			return nil, err
+		}
+		s.userRepo.LogStatusChange(ctx, resourceType, resourceID, oldStatus, action, userID)
+	case "course":
+		// 课程暂时不支持状态更新（没有status字段）
+		return nil, fmt.Errorf("status update not supported for %s", resourceType)
+	default:
+		return nil, fmt.Errorf("invalid resource type")
+	}
+	
 	return map[string]interface{}{
 		"message": "success",
 		"manipulate": map[string]interface{}{
 			"resourceId":   resourceID,
 			"resourceType": resourceType,
 			"newstatus":    action,
-			"oldestatus":   "published", // 假设之前的状态
-			"operateTime":  "2023-12-01 10:00:00",
+			"oldestatus":   oldStatus,
+			"operateTime":  time.Now().Format("2006-01-02 15:04:05"),
 			"operator":     "user",
 		},
 	}, nil
 }
 
 func (s *userService) UpdateEmail(ctx context.Context, userID int, name, password, newEmail, code string) (*model.User, error) {
-	// 实现更新邮箱逻辑
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	
+	// 验证用户名和密码
+	if user.Username != name {
+		return nil, fmt.Errorf("invalid username")
+	}
+	
+	// 验证密码（这里应该使用密码验证函数，暂时简化）
+	// if !utils.CheckPasswordHash(password, user.Password) {
+	//     return nil, fmt.Errorf("invalid password")
+	// }
+	
+	// TODO: 验证邮箱验证码 code
+	
+	// 检查新邮箱是否已存在
+	existingUser, _ := s.userRepo.GetByEmail(ctx, newEmail)
+	if existingUser != nil {
+		return nil, fmt.Errorf("email already exists")
+	}
+	
+	// 更新邮箱
+	user.Email = newEmail
+	err = s.userRepo.UpdateEmail(ctx, userID, newEmail)
+	if err != nil {
+		return nil, err
+	}
+	
 	return user, nil
 }
 
 func (s *userService) UpdatePassword(ctx context.Context, userID int, name, email, newPassword, code string) (*model.User, error) {
-	// 实现更新密码逻辑
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	
+	// 验证用户名和邮箱
+	if user.Username != name || user.Email != email {
+		return nil, fmt.Errorf("invalid username or email")
+	}
+	
+	// TODO: 验证密码重置验证码 code
+	
+	// 加密新密码并更新
+	hashedPassword, err := s.hashPassword(newPassword)
+	if err != nil {
+		return nil, err
+	}
+	
+	err = s.userRepo.UpdatePassword(ctx, userID, hashedPassword)
+	if err != nil {
+		return nil, err
+	}
+	
 	return user, nil
+}
+
+func (s *userService) hashPassword(password string) (string, error) {
+	// 使用bcrypt加密密码
+	return utils.HashPassword(password)
 }

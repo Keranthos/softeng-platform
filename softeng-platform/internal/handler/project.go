@@ -155,12 +155,42 @@ func (h *ProjectHandler) AddComment(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// GetComments 获取项目评论列表
+func (h *ProjectHandler) GetComments(c *gin.Context) {
+	projectID := c.Param("projectId")
+	cursor, _ := strconv.Atoi(c.DefaultQuery("cursor", "0"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+
+	comments, err := h.projectService.GetComments(c.Request.Context(), projectID, cursor, limit)
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response.Success(c, comments)
+}
+
 // DeleteComment 删除评论
 func (h *ProjectHandler) DeleteComment(c *gin.Context) {
 	userID := c.GetInt("userID")
 	projectID := c.Param("projectId")
+	commentID := c.Param("commentId")
 
-	result, err := h.projectService.DeleteComment(c.Request.Context(), userID, projectID)
+	result, err := h.projectService.DeleteComment(c.Request.Context(), userID, projectID, commentID)
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// LikeComment 点赞评论
+func (h *ProjectHandler) LikeComment(c *gin.Context) {
+	userID := c.GetInt("userID")
+	commentID := c.Param("commentId")
+
+	result, err := h.projectService.LikeComment(c.Request.Context(), userID, commentID)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return
