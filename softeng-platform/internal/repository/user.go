@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"softeng-platform/internal/model"
+	"strings"
 	"time"
 )
 
@@ -583,13 +584,23 @@ func (r *userRepository) GetUserPendingItems(ctx context.Context, userID int, re
 func (r *userRepository) GetUserSubmissions(ctx context.Context, userID int, resourceType string) ([]map[string]interface{}, error) {
 	switch resourceType {
 	case "tool":
-		query := `SELECT t.resource_id, t.resource_name, t.category, t.status, t.created_at, t.audit_time, t.reject_reason FROM tools t WHERE t.submitter_id = ? ORDER BY t.created_at DESC`
+		// 先查询所有工具，避免在查询时处理图片导致性能问题
+		query := `SELECT t.resource_id, t.resource_name, t.category, t.status, t.created_at, t.audit_time, t.reject_reason
+		          FROM tools t 
+		          WHERE t.submitter_id = ? 
+		          ORDER BY t.created_at DESC`
 		rows, err := r.db.QueryContext(ctx, query, userID)
 		if err != nil {
+			fmt.Printf("[GetUserSubmissions] 查询工具失败: %v\n", err)
 			return nil, err
 		}
 		defer rows.Close()
+		
+		var toolIDs []int
 		var items []map[string]interface{}
+		toolMap := make(map[int]*map[string]interface{})
+		
+		// 先收集所有工具ID和基本信息
 		for rows.Next() {
 			var resourceID int
 			var name, category, status sql.NullString
@@ -600,33 +611,19 @@ func (r *userRepository) GetUserSubmissions(ctx context.Context, userID int, res
 				continue
 			}
 			
-			// 获取工具图片（从 tool_images 表）
-			var images []string
-			imageRows, _ := r.db.QueryContext(ctx, "SELECT image_url FROM tool_images WHERE tool_id = ? ORDER BY sort_order LIMIT 1", resourceID)
-			if imageRows != nil {
-				defer imageRows.Close()
-				for imageRows.Next() {
-					var imgURL sql.NullString
-					if imageRows.Scan(&imgURL) == nil && imgURL.Valid {
-						images = append(images, imgURL.String)
-						break // 只需要第一张图片
-					}
-				}
-			}
-			if images == nil {
-				images = []string{}
-			}
+			toolIDs = append(toolIDs, resourceID)
 			
-			// 将 status 映射为 auditStatus，并添加 introduce 字段
+			// 将 status 映射为 auditStatus
 			auditStatus := "pending"
 			if status.Valid {
 				auditStatus = status.String
 			}
-			items = append(items, map[string]interface{}{
+			
+			item := map[string]interface{}{
 				"resourceId": resourceID, "resourceType": resourceType, "resourceName": name.String,
-				"introduce": name.String, // 添加 introduce 字段供前端使用
-				"image": images, "images": images, // 添加图片字段
-				"catagory": category.String, "status": auditStatus, "auditStatus": auditStatus, // 同时返回 status 和 auditStatus
+				"introduce": name.String,
+				"image": []string{}, "images": []string{}, // 先设置为空，后面再填充
+				"catagory": category.String, "status": auditStatus, "auditStatus": auditStatus,
 				"submitTime": createdAt.Format("2006-01-02 15:04:05"),
 				"auditTime": func() interface{} {
 					if auditTime.Valid {
@@ -634,11 +631,70 @@ func (r *userRepository) GetUserSubmissions(ctx context.Context, userID int, res
 					}
 					return nil
 				}(), "rejectReason": rejectReason.String,
-			})
+			}
+			items = append(items, item)
+			toolMap[resourceID] = &item
 		}
+		
+		// 如果有工具，批量查询所有图片（简化查询，避免复杂JOIN导致性能问题）
+		if len(toolIDs) > 0 {
+			// 构建IN子句的占位符
+			placeholders := make([]string, len(toolIDs))
+			args := make([]interface{}, len(toolIDs))
+			for i, id := range toolIDs {
+				placeholders[i] = "?"
+				args[i] = id
+			}
+			
+			// 简化查询：直接查询所有图片，然后在代码中处理
+			// 这样避免复杂的子查询和JOIN，性能更好
+			imageQuery := `SELECT tool_id, image_url, sort_order, id
+			               FROM tool_images 
+			               WHERE tool_id IN (` + strings.Join(placeholders, ",") + `)
+			               ORDER BY tool_id, sort_order ASC, id ASC`
+			
+			imageRows, err := r.db.QueryContext(ctx, imageQuery, args...)
+			if err != nil {
+				// 如果查询失败，记录错误但不影响主流程（工具列表仍然返回，只是没有图片）
+				fmt.Printf("[GetUserSubmissions] 查询图片失败 (toolIDs=%v): %v\n", toolIDs, err)
+			} else {
+				defer imageRows.Close()
+				// 使用map记录每个工具的第一张图片
+				firstImageMap := make(map[int]string)
+				for imageRows.Next() {
+					var toolID int
+					var imageURL sql.NullString
+					var sortOrder sql.NullInt64
+					var imageID sql.NullInt64
+					if err := imageRows.Scan(&toolID, &imageURL, &sortOrder, &imageID); err != nil {
+						fmt.Printf("[GetUserSubmissions] 扫描图片数据失败: %v\n", err)
+						continue
+					}
+					// 只记录每个工具的第一张图片
+					if _, exists := firstImageMap[toolID]; !exists && imageURL.Valid && imageURL.String != "" {
+						firstImageMap[toolID] = imageURL.String
+					}
+				}
+				// 将图片URL填充到对应的工具项中
+				for toolID, imageURL := range firstImageMap {
+					if item, ok := toolMap[toolID]; ok {
+						images := []string{imageURL}
+						(*item)["image"] = images
+						(*item)["images"] = images
+					}
+				}
+				fmt.Printf("[GetUserSubmissions] 成功加载 %d 个工具的图片\n", len(firstImageMap))
+			}
+		}
+		
 		return items, nil
 	case "course":
-		query := `SELECT c.course_id, c.name, c.semester, c.created_at FROM courses c WHERE EXISTS (SELECT 1 FROM course_contributors cc WHERE cc.course_id = c.course_id AND cc.user_id = ?) ORDER BY c.created_at DESC`
+		// 使用 INNER JOIN 替代 EXISTS，性能更好
+		query := `SELECT DISTINCT c.course_id, c.name, c.semester, c.created_at 
+		          FROM courses c 
+		          INNER JOIN course_contributors cc ON cc.course_id = c.course_id 
+		          WHERE cc.user_id = ? 
+		          ORDER BY c.created_at DESC`
 		rows, err := r.db.QueryContext(ctx, query, userID)
 		if err != nil {
 			return nil, err
@@ -662,9 +718,11 @@ func (r *userRepository) GetUserSubmissions(ctx context.Context, userID int, res
 		}
 		return items, nil
 	case "project":
-		query := `SELECT p.project_id, p.name, p.category, p.status, p.created_at, p.audit_time, p.reject_reason 
+		// 使用 INNER JOIN 替代 EXISTS，性能更好
+		query := `SELECT DISTINCT p.project_id, p.name, p.category, p.status, p.created_at, p.audit_time, p.reject_reason 
 		          FROM projects p 
-		          WHERE EXISTS (SELECT 1 FROM project_authors pa WHERE pa.project_id = p.project_id AND pa.user_id = ?) 
+		          INNER JOIN project_authors pa ON pa.project_id = p.project_id 
+		          WHERE pa.user_id = ? 
 		          ORDER BY p.created_at DESC`
 		rows, err := r.db.QueryContext(ctx, query, userID)
 		if err != nil {

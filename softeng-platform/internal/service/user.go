@@ -7,6 +7,7 @@ import (
 	"softeng-platform/internal/repository"
 	"softeng-platform/internal/utils"
 	"time"
+	"sync"
 )
 
 type UserService interface {
@@ -98,9 +99,102 @@ func (s *userService) GetStatus(ctx context.Context, userID int) (map[string]int
 }
 
 func (s *userService) GetSummit(ctx context.Context, userID int) (map[string]interface{}, error) {
-	tools, _ := s.userRepo.GetUserSubmissions(ctx, userID, "tool")
-	courses, _ := s.userRepo.GetUserSubmissions(ctx, userID, "course")
-	projects, _ := s.userRepo.GetUserSubmissions(ctx, userID, "project")
+	// 创建带超时的上下文，每个查询最多10秒
+	queryTimeout := 10 * time.Second
+	
+	// 使用 WaitGroup 并行执行三个查询
+	var wg sync.WaitGroup
+	var tools, courses, projects []map[string]interface{}
+	var toolsErr, coursesErr, projectsErr error
+	
+	// 查询工具
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("[GetSummit] 查询工具时发生panic: %v\n", r)
+				toolsErr = fmt.Errorf("panic: %v", r)
+				tools = []map[string]interface{}{}
+			}
+		}()
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+		start := time.Now()
+		tools, toolsErr = s.userRepo.GetUserSubmissions(queryCtx, userID, "tool")
+		elapsed := time.Since(start)
+		if toolsErr != nil {
+			fmt.Printf("[GetSummit] 查询工具失败 (耗时: %v): %v\n", elapsed, toolsErr)
+		} else {
+			fmt.Printf("[GetSummit] 查询工具成功 (耗时: %v, 数量: %d)\n", elapsed, len(tools))
+		}
+	}()
+	
+	// 查询课程
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("[GetSummit] 查询课程时发生panic: %v\n", r)
+				coursesErr = fmt.Errorf("panic: %v", r)
+				courses = []map[string]interface{}{}
+			}
+		}()
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+		start := time.Now()
+		courses, coursesErr = s.userRepo.GetUserSubmissions(queryCtx, userID, "course")
+		elapsed := time.Since(start)
+		if coursesErr != nil {
+			fmt.Printf("[GetSummit] 查询课程失败 (耗时: %v): %v\n", elapsed, coursesErr)
+		} else {
+			fmt.Printf("[GetSummit] 查询课程成功 (耗时: %v, 数量: %d)\n", elapsed, len(courses))
+		}
+	}()
+	
+	// 查询项目
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("[GetSummit] 查询项目时发生panic: %v\n", r)
+				projectsErr = fmt.Errorf("panic: %v", r)
+				projects = []map[string]interface{}{}
+			}
+		}()
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+		start := time.Now()
+		projects, projectsErr = s.userRepo.GetUserSubmissions(queryCtx, userID, "project")
+		elapsed := time.Since(start)
+		if projectsErr != nil {
+			fmt.Printf("[GetSummit] 查询项目失败 (耗时: %v): %v\n", elapsed, projectsErr)
+		} else {
+			fmt.Printf("[GetSummit] 查询项目成功 (耗时: %v, 数量: %d)\n", elapsed, len(projects))
+		}
+	}()
+	
+	// 等待所有查询完成
+	wg.Wait()
+	
+	// 如果所有查询都失败，返回错误
+	if toolsErr != nil && coursesErr != nil && projectsErr != nil {
+		return nil, fmt.Errorf("failed to fetch submissions: tools=%v, courses=%v, projects=%v", toolsErr, coursesErr, projectsErr)
+	}
+	
+	// 如果部分查询失败，记录错误但继续返回成功的结果
+	// 将错误结果设置为空数组
+	if toolsErr != nil {
+		tools = []map[string]interface{}{}
+	}
+	if coursesErr != nil {
+		courses = []map[string]interface{}{}
+	}
+	if projectsErr != nil {
+		projects = []map[string]interface{}{}
+	}
 	
 	return map[string]interface{}{
 		"message":   "success",

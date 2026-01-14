@@ -18,7 +18,32 @@ import (
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/joho/godotenv/autoload"
+	
+	// Swagger
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 )
+
+// @title 软件工程平台 API
+// @version 1.0
+// @description 软件工程平台后端API文档
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name API Support
+// @contact.url http://www.swagger.io/support
+// @contact.email support@swagger.io
+
+// @license.name Apache 2.0
+// @license.url http://www.apache.org/licenses/LICENSE-2.0.html
+
+// @host localhost:8080
+// @BasePath /
+// @schemes http https
+
+// @securityDefinitions.apikey Bearer
+// @in header
+// @name Authorization
+// @description 使用 "Bearer {token}" 格式，token通过登录接口获取
 
 func main() {
 	// 初始化配置
@@ -77,6 +102,9 @@ func main() {
 
 	// 静态文件服务（图片上传目录）
 	r.Static("/uploads", "./uploads")
+	
+	// Swagger API文档
+	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	// 认证路由
 	auth := r.Group("/auth")

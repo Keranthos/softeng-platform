@@ -20,6 +20,19 @@ func NewToolHandler(toolService service.ToolService) *ToolHandler {
 }
 
 // GetTools 获取工具列表
+// @Summary 获取工具列表
+// @Description 根据分类、标签等条件获取工具列表，支持分页和排序
+// @Tags tools
+// @Accept json
+// @Produce json
+// @Param catagory query array false "工具分类"
+// @Param tag query array false "工具标签"
+// @Param sort query string false "排序方式：最新/newest, 最多浏览/views, 最多收藏/collections, 最多点赞/loves"
+// @Param cursor query string false "分页游标"
+// @Param page_size query int false "每页数量" default(10)
+// @Success 200 {object} map[string]interface{} "成功返回工具列表"
+// @Failure 500 {object} map[string]interface{} "服务器错误"
+// @Router /tools [get]
 func (h *ToolHandler) GetTools(c *gin.Context) {
 	category := c.QueryArray("catagory")
 	tags := c.QueryArray("tag")
@@ -37,6 +50,18 @@ func (h *ToolHandler) GetTools(c *gin.Context) {
 }
 
 // SearchTools 搜索工具
+// @Summary 搜索工具
+// @Description 根据关键词搜索工具
+// @Tags tools
+// @Accept json
+// @Produce json
+// @Param keyword query string true "搜索关键词"
+// @Param cursor query string false "分页游标"
+// @Param page_size query int false "每页数量" default(10)
+// @Param resourceType query string false "资源类型"
+// @Success 200 {object} map[string]interface{} "成功返回搜索结果"
+// @Failure 500 {object} map[string]interface{} "服务器错误"
+// @Router /tools/search [get]
 func (h *ToolHandler) SearchTools(c *gin.Context) {
 	keyword := c.Query("keyword")
 	cursor := c.Query("cursor")
@@ -53,6 +78,16 @@ func (h *ToolHandler) SearchTools(c *gin.Context) {
 }
 
 // GetTool 获取工具详情
+// @Summary 获取工具详情
+// @Description 根据工具ID获取详细信息，包括评论、标签等
+// @Tags tools
+// @Accept json
+// @Produce json
+// @Param resourceId path string true "工具ID"
+// @Param resourceType query string false "资源类型"
+// @Success 200 {object} map[string]interface{} "成功返回工具详情"
+// @Failure 404 {object} map[string]interface{} "工具不存在"
+// @Router /tools/{resourceId} [get]
 func (h *ToolHandler) GetTool(c *gin.Context) {
 	resourceID := c.Param("resourceId")
 	resourceType := c.Query("resourceType")

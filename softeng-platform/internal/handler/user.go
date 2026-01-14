@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"net/http"
 	"softeng-platform/internal/model"
 	"softeng-platform/internal/service"
@@ -111,14 +112,38 @@ func (h *UserHandler) GetStatus(c *gin.Context) {
 
 // GetSummit 获取个人提交
 func (h *UserHandler) GetSummit(c *gin.Context) {
+	// 添加recover来捕获可能的panic
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[GetSummit] Panic recovered: %v", r)
+			response.Error(c, http.StatusInternalServerError, "Internal server error")
+		}
+	}()
+
 	userID := c.GetInt("userID")
+	log.Printf("[GetSummit] 开始获取用户 %d 的提交记录", userID)
 
 	summit, err := h.userService.GetSummit(c.Request.Context(), userID)
 	if err != nil {
+		log.Printf("[GetSummit] 获取提交记录失败: %v", err)
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	// 安全地获取长度，避免类型断言panic
+	var toolsCount, coursesCount, projectsCount int
+	if tools, ok := summit["tools"].([]map[string]interface{}); ok {
+		toolsCount = len(tools)
+	}
+	if teaches, ok := summit["teaches"].([]map[string]interface{}); ok {
+		coursesCount = len(teaches)
+	}
+	if resources, ok := summit["resources"].([]map[string]interface{}); ok {
+		projectsCount = len(resources)
+	}
+	
+	log.Printf("[GetSummit] 成功获取提交记录: tools=%d, courses=%d, projects=%d", 
+		toolsCount, coursesCount, projectsCount)
 	response.Success(c, summit)
 }
 
