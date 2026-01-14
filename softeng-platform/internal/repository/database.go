@@ -1,12 +1,12 @@
+
 package repository
 
 import (
 	"database/sql"
 	"fmt"
+	_ "github.com/go-sql-driver/mysql"
 	"log"
 	"time"
-
-	_ "github.com/go-sql-driver/mysql" // MySQL驱动
 )
 
 type Database struct {
@@ -19,15 +19,9 @@ func NewDatabase(connectionString string) (*Database, error) {
 		return nil, fmt.Errorf("failed to open database: %v", err)
 	}
 
-	// 配置连接池参数
-	// SetMaxOpenConns 设置打开数据库连接的最大数量
+	// 设置连接池参数
 	db.SetMaxOpenConns(25)
-	
-	// SetMaxIdleConns 设置空闲连接池中连接的最大数量
-	db.SetMaxIdleConns(10)
-	
-	// SetConnMaxLifetime 设置了连接可复用的最大时间
-	// 超过这个时间的连接会在下次使用时被关闭并重新创建
+	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err = db.Ping(); err != nil {
@@ -47,3 +41,4 @@ func NewDatabase(connectionString string) (*Database, error) {
 func (db *Database) Close() error {
 	return db.DB.Close()
 }
+
