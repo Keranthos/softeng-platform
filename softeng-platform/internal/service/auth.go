@@ -3,15 +3,14 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"softeng-platform/internal/model"
 	"softeng-platform/internal/repository"
 	"softeng-platform/internal/utils"
 )
 
 type AuthService interface {
-	Register(ctx context.Context, req model.RegisterRequest) (*model.User, error)
-	Login(ctx context.Context, req model.LoginRequest) (*model.User, error)
+	Register(ctx context.Context, req model.RegisterRequest) (string, error)
+	Login(ctx context.Context, req model.LoginRequest) (string, error)
 	ForgotPassword(ctx context.Context, email, newPassword, code string) error
 }
 
@@ -23,32 +22,32 @@ func NewAuthService(userRepo repository.UserRepository) AuthService {
 	return &authService{userRepo: userRepo}
 }
 
-func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (*model.User, error) {
+func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (string, error) {
 	// 检查用户名是否已存在
 	existingUser, _ := s.userRepo.GetByUsername(ctx, req.Username)
 	if existingUser != nil {
-		return nil, errors.New("username already exists")
+		return "", errors.New("username already exists")
 	}
 
 	// 检查邮箱是否已存在
 	existingEmail, _ := s.userRepo.GetByEmail(ctx, req.Email)
 	if existingEmail != nil {
-		return nil, errors.New("email already exists")
+		return "", errors.New("email already exists")
 	}
 
 	// 验证邮箱验证码和邀请码（这里需要实现具体的验证逻辑）
 	if !s.validateEmailCode(req.Email, req.EmailPassword) {
-		return nil, errors.New("invalid email verification code")
+		return "", errors.New("invalid email verification code")
 	}
 
 	if !s.validateCertifyCode(req.CertifyPassword) {
-		return nil, errors.New("invalid invitation code")
+		return "", errors.New("invalid invitation code")
 	}
 
 	// 加密密码
 	hashedPassword, err := utils.HashPassword(req.Password)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	// 创建用户
@@ -62,48 +61,45 @@ func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (
 
 	err = s.userRepo.Create(ctx, user)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return user, nil
+	// 生成 JWT
+	token, err := utils.GenerateToken(user.ID, user.Username, user.Role)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
 }
 
-func (s *authService) Login(ctx context.Context, req model.LoginRequest) (*model.User, error) {
+func (s *authService) Login(ctx context.Context, req model.LoginRequest) (string, error) {
 	var user *model.User
 	var err error
 
-	// 根据用户名、邮箱或昵称查找用户
+	// 根据用户名或邮箱查找用户
 	if contains(req.UsernameOrEmail, "@") {
-		// 包含@符号，按邮箱查找
 		user, err = s.userRepo.GetByEmail(ctx, req.UsernameOrEmail)
 	} else {
-		// 先按用户名查找
 		user, err = s.userRepo.GetByUsername(ctx, req.UsernameOrEmail)
-		// 如果按用户名找不到，尝试按昵称查找
-		if err == nil && user == nil {
-			user, err = s.userRepo.GetByNickname(ctx, req.UsernameOrEmail)
-		}
 	}
 
-	// 检查是否有数据库错误
-	if err != nil {
-		return nil, fmt.Errorf("数据库查询错误: %v", err)
-	}
-
-	// 检查用户是否存在
-	if user == nil {
-		// 使用中文错误信息，确认后端使用了新代码
-		return nil, errors.New("用户不存在，请检查用户名、昵称或邮箱是否正确")
+	if err != nil || user == nil {
+		return "", errors.New("invalid credentials")
 	}
 
 	// 验证密码
-	passwordMatch := utils.CheckPasswordHash(req.Password, user.Password)
-	if !passwordMatch {
-		// 使用中文错误信息，确认后端使用了新代码
-		return nil, errors.New("密码错误，请重新输入")
+	if !utils.CheckPasswordHash(req.Password, user.Password) {
+		return "", errors.New("invalid credentials")
 	}
 
-	return user, nil
+	// 生成 JWT
+	token, err := utils.GenerateToken(user.ID, user.Username, user.Role)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
 }
 
 func (s *authService) ForgotPassword(ctx context.Context, email, newPassword, certifyPassword string) error {

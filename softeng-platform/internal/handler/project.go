@@ -3,8 +3,10 @@ package handler
 import (
 	"net/http"
 	"softeng-platform/internal/service"
+	"softeng-platform/internal/utils"
 	"softeng-platform/pkg/response"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -55,7 +57,20 @@ func (h *ProjectHandler) SearchProjects(c *gin.Context) {
 func (h *ProjectHandler) GetProject(c *gin.Context) {
 	projectID := c.Param("projectId")
 
-	project, err := h.projectService.GetProject(c.Request.Context(), projectID)
+	// 可选鉴权：有 token 则返回 isliked/iscollected + 评论；没 token 也能正常看详情
+	userID := 0
+	authHeader := c.GetHeader("Authorization")
+	if authHeader != "" {
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := utils.ValidateToken(tokenString)
+		if err != nil {
+			response.Error(c, http.StatusUnauthorized, "Invalid token")
+			return
+		}
+		userID = claims.UserID
+	}
+
+	project, err := h.projectService.GetProject(c.Request.Context(), projectID, userID)
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "Project not found")
 		return
@@ -155,42 +170,17 @@ func (h *ProjectHandler) AddComment(c *gin.Context) {
 	response.Success(c, result)
 }
 
-// GetComments 获取项目评论列表
-func (h *ProjectHandler) GetComments(c *gin.Context) {
-	projectID := c.Param("projectId")
-	cursor, _ := strconv.Atoi(c.DefaultQuery("cursor", "0"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
-
-	comments, err := h.projectService.GetComments(c.Request.Context(), projectID, cursor, limit)
-	if err != nil {
-		response.Error(c, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	response.Success(c, comments)
-}
-
 // DeleteComment 删除评论
 func (h *ProjectHandler) DeleteComment(c *gin.Context) {
 	userID := c.GetInt("userID")
 	projectID := c.Param("projectId")
-	commentID := c.Param("commentId")
-
-	result, err := h.projectService.DeleteComment(c.Request.Context(), userID, projectID, commentID)
-	if err != nil {
-		response.Error(c, http.StatusInternalServerError, err.Error())
-		return
+	commentID := c.Query("commentId")
+	if commentID == "" {
+		commentID = c.Query("comment_id")
 	}
 
-	response.Success(c, result)
-}
-
-// LikeComment 点赞评论
-func (h *ProjectHandler) LikeComment(c *gin.Context) {
-	userID := c.GetInt("userID")
-	commentID := c.Param("commentId")
-
-	result, err := h.projectService.LikeComment(c.Request.Context(), userID, commentID)
+	// 兼容：commentID 为空时，后端会删除该用户在该项目下“最新一条”评论
+	result, err := h.projectService.DeleteComment(c.Request.Context(), userID, projectID, commentID)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return

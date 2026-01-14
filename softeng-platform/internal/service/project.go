@@ -2,22 +2,19 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"softeng-platform/internal/repository"
 )
 
 type ProjectService interface {
 	GetProjects(ctx context.Context, category string, techStack []string, sort string, limit int, cursor, resourceType string) (map[string]interface{}, error)
-	GetProject(ctx context.Context, projectID string) (map[string]interface{}, error)
+	GetProject(ctx context.Context, projectID string, userID int) (map[string]interface{}, error)
 	SearchProjects(ctx context.Context, keyword string, category []string, cursor string, limit int) (map[string]interface{}, error)
 	UploadProject(ctx context.Context, userID int, req ProjectUploadRequest) (map[string]interface{}, error)
 	UpdateProject(ctx context.Context, userID int, projectID string, req ProjectUploadRequest) (map[string]interface{}, error)
 	LikeProject(ctx context.Context, userID int, projectID string) (map[string]interface{}, error)
 	UnlikeProject(ctx context.Context, userID int, projectID string) (map[string]interface{}, error)
-	GetComments(ctx context.Context, projectID string, cursor, limit int) (map[string]interface{}, error)
 	AddComment(ctx context.Context, userID int, projectID, content string) (map[string]interface{}, error)
-	DeleteComment(ctx context.Context, userID int, projectID, commentID string) (map[string]interface{}, error)
-	LikeComment(ctx context.Context, userID int, commentID string) (map[string]interface{}, error)
+	DeleteComment(ctx context.Context, userID int, projectID string, commentID string) (map[string]interface{}, error)
 	ReplyComment(ctx context.Context, userID int, projectID, commentID, content string) (map[string]interface{}, error)
 	DeleteReply(ctx context.Context, userID int, projectID, commentID string) (map[string]interface{}, error)
 	AddView(ctx context.Context, projectID string) (map[string]interface{}, error)
@@ -56,8 +53,8 @@ func (s *projectService) GetProjects(ctx context.Context, category string, techS
 	}, nil
 }
 
-func (s *projectService) GetProject(ctx context.Context, projectID string) (map[string]interface{}, error) {
-	project, err := s.projectRepo.GetByID(ctx, projectID)
+func (s *projectService) GetProject(ctx context.Context, projectID string, userID int) (map[string]interface{}, error) {
+	project, err := s.projectRepo.GetByID(ctx, projectID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -162,41 +159,15 @@ func (s *projectService) AddComment(ctx context.Context, userID int, projectID, 
 	}, nil
 }
 
-func (s *projectService) GetComments(ctx context.Context, projectID string, cursor, limit int) (map[string]interface{}, error) {
-	comments, err := s.projectRepo.GetComments(ctx, projectID, cursor, limit)
+func (s *projectService) DeleteComment(ctx context.Context, userID int, projectID string, commentID string) (map[string]interface{}, error) {
+	comment, err := s.projectRepo.DeleteComment(ctx, userID, projectID, commentID)
 	if err != nil {
 		return nil, err
 	}
 
 	return map[string]interface{}{
 		"message": "success",
-		"data":    comments,
-	}, nil
-}
-
-func (s *projectService) DeleteComment(ctx context.Context, userID int, projectID, commentID string) (map[string]interface{}, error) {
-	err := s.projectRepo.DeleteComment(ctx, userID, projectID, commentID)
-	if err != nil {
-		return nil, err
-	}
-
-	return map[string]interface{}{
-		"message": "Comment deleted successfully",
-	}, nil
-}
-
-func (s *projectService) LikeComment(ctx context.Context, userID int, commentID string) (map[string]interface{}, error) {
-	isLiked, likes, err := s.projectRepo.LikeComment(ctx, userID, commentID)
-	if err != nil {
-		return nil, err
-	}
-
-	return map[string]interface{}{
-		"message": "success",
-		"data": map[string]interface{}{
-			"isLiked": isLiked,
-			"likes":   likes,
-		},
+		"data":    comment,
 	}, nil
 }
 
@@ -239,47 +210,25 @@ func (s *projectService) AddView(ctx context.Context, projectID string) (map[str
 }
 
 func (s *projectService) CollectProject(ctx context.Context, userID int, projectID string) (map[string]interface{}, error) {
-	err := s.projectRepo.CollectProject(ctx, userID, projectID)
+	result, err := s.projectRepo.CollectProject(ctx, userID, projectID)
 	if err != nil {
 		return nil, err
-	}
-	
-	// 直接从 collections 表统计最新的收藏数，而不是从 projects 表读取
-	// 这样可以确保数据的准确性
-	collections, err := s.projectRepo.GetCollectionCount(ctx, projectID)
-	if err != nil {
-		// 如果获取收藏数失败，返回错误
-		return nil, fmt.Errorf("failed to get collection count: %w", err)
 	}
 
 	return map[string]interface{}{
 		"message": "success",
-		"data": map[string]interface{}{
-			"collections": collections,
-			"iscollected": true,
-		},
+		"data":    result,
 	}, nil
 }
 
 func (s *projectService) UncollectProject(ctx context.Context, userID int, projectID string) (map[string]interface{}, error) {
-	err := s.projectRepo.UncollectProject(ctx, userID, projectID)
+	result, err := s.projectRepo.UncollectProject(ctx, userID, projectID)
 	if err != nil {
 		return nil, err
 	}
 
-	// 直接从 collections 表统计最新的收藏数，而不是从 projects 表读取
-	// 这样可以确保数据的准确性
-	collections, err := s.projectRepo.GetCollectionCount(ctx, projectID)
-	if err != nil {
-		// 如果获取收藏数失败，返回错误
-		return nil, fmt.Errorf("failed to get collection count: %w", err)
-	}
-
 	return map[string]interface{}{
 		"message": "success",
-		"data": map[string]interface{}{
-			"collections": collections,
-			"iscollected": false,
-		},
+		"data":    result,
 	}, nil
 }

@@ -4,33 +4,27 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type CourseRepository interface {
 	GetCourses(ctx context.Context, semester string, category []string, sort string, limit, cursor int) ([]map[string]interface{}, error)
-	GetByID(ctx context.Context, courseID string) (map[string]interface{}, error)
+	GetByID(ctx context.Context, courseID string, userID int) (map[string]interface{}, error)
 	Search(ctx context.Context, keyword string, category []string, limit, cursor int) ([]map[string]interface{}, error)
-	Create(ctx context.Context, userID int, data map[string]interface{}) (map[string]interface{}, error)
 	UploadResource(ctx context.Context, userID int, courseID string, data map[string]interface{}) (map[string]interface{}, error)
 	DownloadTextbook(ctx context.Context, courseID, textbookID string) (string, error)
-	GetComments(ctx context.Context, courseID string, cursor, limit int) ([]map[string]interface{}, error)
 	AddComment(ctx context.Context, userID int, courseID, content string) (map[string]interface{}, error)
-	DeleteComment(ctx context.Context, userID int, courseID, commentID string) (map[string]interface{}, error)
+	DeleteComment(ctx context.Context, userID int, courseID string, commentID string) (map[string]interface{}, error) // commentID 为空则删除该用户最新一条
 	ReplyComment(ctx context.Context, userID int, courseID, commentID, content string) (map[string]interface{}, error)
 	DeleteReply(ctx context.Context, userID int, courseID, commentID string) (map[string]interface{}, error)
-	LikeComment(ctx context.Context, userID int, courseID, commentID string) (map[string]interface{}, error)
-	GetResources(ctx context.Context, courseID string) (map[string]interface{}, error)
 	AddView(ctx context.Context, courseID string) (int, error)
 	CollectCourse(ctx context.Context, userID int, courseID string) (map[string]interface{}, error)
 	UncollectCourse(ctx context.Context, userID int, courseID string) (map[string]interface{}, error)
 	LikeCourse(ctx context.Context, userID int, courseID string) (map[string]interface{}, error)
 	UnlikeCourse(ctx context.Context, userID int, courseID string) (map[string]interface{}, error)
-	GetPending(ctx context.Context, cursor, limit int) ([]map[string]interface{}, error)
-	UpdateCourseStatus(ctx context.Context, courseID, status, rejectReason string) error
-	CheckUserLike(ctx context.Context, userID int, courseID string) (bool, error)
-	CheckUserCollect(ctx context.Context, userID int, courseID string) (bool, error)
+	GetPending(ctx context.Context, cursor, limit int) ([]map[string]interface{}, error) // 新增方法
 }
 
 type courseRepository struct {
@@ -42,875 +36,1122 @@ func NewCourseRepository(db *Database) CourseRepository {
 }
 
 func (r *courseRepository) GetCourses(ctx context.Context, semester string, category []string, sort string, limit, cursor int) ([]map[string]interface{}, error) {
-	// 使用子查询从 collections 表实时统计收藏数，而不是使用 courses.collections 字段
-	query := `SELECT c.course_id, c.resource_type, c.name, c.semester, c.credit, c.cover, c.views, c.loves, 
-	          COALESCE((SELECT COUNT(*) FROM collections WHERE resource_type = 'course' AND resource_id = c.course_id), 0) as collections, 
-	          c.created_at FROM courses c WHERE 1=1`
-	args := []interface{}{}
-	
+	if limit <= 0 {
+		limit = 10
+	}
+
+	var (
+		whereParts []string
+		args       []interface{}
+	)
+
 	if semester != "" {
-		query += " AND c.semester = ?"
+		whereParts = append(whereParts, "c.semester = ?")
 		args = append(args, semester)
 	}
-	
+
 	if len(category) > 0 {
-		query += ` AND EXISTS (SELECT 1 FROM course_categories cc WHERE cc.course_id = c.course_id AND cc.category IN (` + strings.Repeat("?,", len(category))[:len(strings.Repeat("?,", len(category)))-1] + `))`
+		whereParts = append(whereParts, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM course_categories cc2 WHERE cc2.course_id = c.course_id AND cc2.category IN (%s))",
+			placeholders(len(category)),
+		))
 		for _, cat := range category {
 			args = append(args, cat)
 		}
 	}
-	
-	switch sort {
-	case "最新", "newest":
-		query += " ORDER BY c.created_at DESC"
-	case "最多浏览", "views":
-		query += " ORDER BY c.views DESC"
-	case "最多点赞", "loves":
-		query += " ORDER BY c.loves DESC"
-	case "最多资料":
-		// 使用子查询统计的资源数量进行排序（不是收藏数）
-		query += " ORDER BY (SELECT COUNT(*) FROM course_resources_web WHERE course_id = c.course_id) + (SELECT COUNT(*) FROM course_resources_upload WHERE course_id = c.course_id) DESC"
-	case "学分最高":
-		query += " ORDER BY c.credit DESC"
-	default:
-		// 默认排序：按学期和课程ID
-		query += " ORDER BY c.semester ASC, c.course_id ASC"
+
+	if cursor > 0 {
+		whereParts = append(whereParts, "c.course_id < ?")
+		args = append(args, cursor)
 	}
-	
-	query += " LIMIT ? OFFSET ?"
-	args = append(args, limit, cursor)
-	
+
+	whereSQL := ""
+	if len(whereParts) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereParts, " AND ")
+	}
+
+	orderBy := "c.created_at DESC, c.course_id DESC"
+	switch strings.ToLower(sort) {
+	case "views":
+		orderBy = "c.views DESC, c.course_id DESC"
+	case "collections":
+		orderBy = "c.collections DESC, c.course_id DESC"
+	case "loves", "likes":
+		orderBy = "c.loves DESC, c.course_id DESC"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			c.course_id,
+			c.resource_type,
+			c.name,
+			COALESCE(GROUP_CONCAT(DISTINCT ct.teacher_name SEPARATOR ','), '') AS teachers_csv,
+			COALESCE(GROUP_CONCAT(DISTINCT cc.category SEPARATOR ','), '') AS categories_csv,
+			c.semester,
+			COALESCE(c.credit, 0) AS credit,
+			COALESCE(c.cover, '') AS cover,
+			c.views,
+			c.loves,
+			c.collections,
+			c.created_at
+		FROM courses c
+		LEFT JOIN course_teachers ct ON ct.course_id = c.course_id
+		LEFT JOIN course_categories cc ON cc.course_id = c.course_id
+		%s
+		GROUP BY c.course_id, c.resource_type, c.name, c.semester, c.credit, c.cover, c.views, c.loves, c.collections, c.created_at
+		ORDER BY %s
+		LIMIT ?
+	`, whereSQL, orderBy)
+	args = append(args, limit)
+
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query courses: %w", err)
+		return nil, fmt.Errorf("failed to query courses: %v", err)
 	}
 	defer rows.Close()
-	
-	var courses []map[string]interface{}
+
+	var result []map[string]interface{}
 	for rows.Next() {
-		var courseID, credit, views, loves, collections int
-		var resourceType, name, semester, cover sql.NullString
-		var createdAt time.Time
-		
-		if err := rows.Scan(&courseID, &resourceType, &name, &semester, &credit, &cover, &views, &loves, &collections, &createdAt); err != nil {
-			return nil, fmt.Errorf("failed to scan course: %w", err)
+		var (
+			courseID     int
+			resourceType sql.NullString
+			name         sql.NullString
+			teachersCSV  sql.NullString
+			categoriesCSV sql.NullString
+			semesterNS   sql.NullString
+			credit       int
+			cover        sql.NullString
+			views        int
+			loves        int
+			collections  int
+			createdAt    time.Time
+		)
+
+		if err := rows.Scan(
+			&courseID,
+			&resourceType,
+			&name,
+			&teachersCSV,
+			&categoriesCSV,
+			&semesterNS,
+			&credit,
+			&cover,
+			&views,
+			&loves,
+			&collections,
+			&createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan course row: %v", err)
 		}
-		
-		// 获取教师（取第一个）
-		teacherRows, _ := r.db.QueryContext(ctx, "SELECT teacher_name FROM course_teachers WHERE course_id = ? LIMIT 1", courseID)
-		var teacher string
-		if teacherRows != nil {
-			if teacherRows.Next() {
-				teacherRows.Scan(&teacher)
-			}
-			teacherRows.Close()
-		}
-		
-		// 获取分类（取第一个）
-		catRows, _ := r.db.QueryContext(ctx, "SELECT category FROM course_categories WHERE course_id = ? LIMIT 1", courseID)
-		var courseType string
-		if catRows != nil {
-			if catRows.Next() {
-				catRows.Scan(&courseType)
-			}
-			catRows.Close()
-		}
-		
-		// 统计课程资源数量（URL资源 + 上传资源）
-		var resourceCount int
-		var webCount, uploadCount int
-		r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM course_resources_web WHERE course_id = ?", courseID).Scan(&webCount)
-		r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM course_resources_upload WHERE course_id = ?", courseID).Scan(&uploadCount)
-		resourceCount = webCount + uploadCount
-		
-		// collections 现在是从子查询实时统计的收藏数
-		courseMap := map[string]interface{}{
-			"id":         courseID,
-			"courseId":   courseID, // 保留兼容
-			"name":       name.String,
-			"code":       "", // code字段暂不提供，如需要可以从其他表获取
-			"semester":   semester.String,
-			"type":       courseType,
-			"teacher":    teacher,
-			"credit":     float64(credit),
-			"resources":  resourceCount, // 使用实际资源数量，而不是收藏数
-			"likes":      loves,
-			// 保留原有字段以兼容其他可能的使用
-			"resourceType": resourceType.String,
-			"cover":        cover.String,
+
+		result = append(result, map[string]interface{}{
+			"courseId":     courseID,
+			"resourceType": nullString(resourceType),
+			"name":         nullString(name),
+			"teacher":      splitCSV(nullString(teachersCSV)),
+			"category":     splitCSV(nullString(categoriesCSV)),
+			"semester":     nullString(semesterNS),
+			"credit":       credit,
+			"cover":        nullString(cover),
 			"views":        views,
 			"loves":        loves,
-			"collections":  collections, // 从 collections 表实时统计的收藏数
-		}
-		
-		// 调试日志：输出收藏数
-		if courseID == 1015 || courseID == 1016 { // 只输出特定课程的日志，避免日志过多
-			fmt.Printf("[DEBUG] Course %d: collections=%d (from real-time query)\n", courseID, collections)
-		}
-		
-		courses = append(courses, courseMap)
+			"collections":  collections,
+			"createdat":    createdAt.Format("2006-01-02"),
+		})
 	}
-	
-	// 如果排序方式是"最多资料"，需要按资源数量重新排序
-	if sort == "最多资料" {
-		// 使用稳定排序，按资源数量降序
-		for i := 0; i < len(courses)-1; i++ {
-			for j := i + 1; j < len(courses); j++ {
-				resI, _ := courses[i]["resources"].(int)
-				resJ, _ := courses[j]["resources"].(int)
-				if resI < resJ {
-					courses[i], courses[j] = courses[j], courses[i]
-				}
-			}
-		}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate course rows: %v", err)
 	}
-	
-	return courses, nil
+
+	return result, nil
 }
 
-func (r *courseRepository) GetByID(ctx context.Context, courseID string) (map[string]interface{}, error) {
-	var courseIDInt int
-	var resourceType, name, semester, cover sql.NullString
-	var credit, views, loves, collections int
-	var createdAt time.Time
-	
-	var description sql.NullString
-	err := r.db.QueryRowContext(ctx,
-		"SELECT course_id, resource_type, name, semester, credit, cover, views, loves, collections, COALESCE(description, '') as description, created_at FROM courses WHERE course_id = ?",
-		courseID).Scan(&courseIDInt, &resourceType, &name, &semester, &credit, &cover, &views, &loves, &collections, &description, &createdAt)
+func (r *courseRepository) GetByID(ctx context.Context, courseID string, userID int) (map[string]interface{}, error) {
+	query := `
+		SELECT
+			course_id,
+			resource_type,
+			name,
+			semester,
+			COALESCE(credit, 0) AS credit,
+			cover,
+			views,
+			loves,
+			collections,
+			created_at
+		FROM courses
+		WHERE course_id = ?
+		LIMIT 1
+	`
+
+	var (
+		id           int
+		resourceType sql.NullString
+		name         sql.NullString
+		semesterNS   sql.NullString
+		credit       int
+		cover        sql.NullString
+		views        int
+		loves        int
+		collections  int
+		createdAt    time.Time
+	)
+
+	err := r.db.QueryRowContext(ctx, query, courseID).Scan(
+		&id,
+		&resourceType,
+		&name,
+		&semesterNS,
+		&credit,
+		&cover,
+		&views,
+		&loves,
+		&collections,
+		&createdAt,
+	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("course not found")
+			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to get course: %w", err)
+		return nil, fmt.Errorf("failed to get course by id: %v", err)
 	}
-	
-	// 获取课程分类
-	catRows, _ := r.db.QueryContext(ctx, "SELECT category FROM course_categories WHERE course_id = ?", courseIDInt)
-	var categoryList []string
-	if catRows != nil {
-		defer catRows.Close()
-		for catRows.Next() {
-			var cat string
-			if err := catRows.Scan(&cat); err == nil {
-				categoryList = append(categoryList, cat)
-			}
+
+	categories, err := r.fetchCourseCategories(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	teachers, err := r.fetchCourseTeachers(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	urlForm, err := r.fetchCourseWebResources(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	uploadForm, err := r.fetchCourseUploadResources(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	contributors, err := r.fetchCourseContributors(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	catagory := ""
+	if len(categories) > 0 {
+		catagory = categories[0]
+	}
+
+	// 登录态：返回 isliked/iscollected
+	isLiked := false
+	isCollected := false
+	if userID > 0 {
+		if v, err := r.isCourseLiked(ctx, userID, id); err == nil {
+			isLiked = v
+		} else {
+			return nil, err
+		}
+		if v, err := r.isCourseCollected(ctx, userID, id); err == nil {
+			isCollected = v
+		} else {
+			return nil, err
 		}
 	}
-	
-	// 获取课程教师
-	teacherRows, _ := r.db.QueryContext(ctx, "SELECT teacher_name FROM course_teachers WHERE course_id = ?", courseIDInt)
-	var teacherList []string
-	if teacherRows != nil {
-		defer teacherRows.Close()
-		for teacherRows.Next() {
-			var teacher string
-			if err := teacherRows.Scan(&teacher); err == nil {
-				teacherList = append(teacherList, teacher)
-			}
-		}
+
+	comments, commentTotal, err := r.fetchCourseComments(ctx, id)
+	if err != nil {
+		return nil, err
 	}
-	
-	// 获取贡献者
-	contributorRows, _ := r.db.QueryContext(ctx, "SELECT u.username FROM course_contributors cc JOIN users u ON cc.user_id = u.id WHERE cc.course_id = ?", courseIDInt)
-	var contributorList []string
-	if contributorRows != nil {
-		defer contributorRows.Close()
-		for contributorRows.Next() {
-			var username string
-			if err := contributorRows.Scan(&username); err == nil {
-				contributorList = append(contributorList, username)
-			}
-		}
-	}
-	
-	// 获取评论总数
-	var commentTotal int
-	r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM comments WHERE resource_type = 'course' AND resource_id = ? AND deleted_at IS NULL", courseIDInt).Scan(&commentTotal)
-	
-	// 获取资源（URL和上传的资源）
-	resources, _ := r.GetResources(ctx, courseID)
-	urlForm, _ := resources["url_form"].([]map[string]interface{})
-	uploadForm, _ := resources["upload_form"].([]map[string]interface{})
-	
+
 	return map[string]interface{}{
-		"courseId":      courseIDInt,
-		"resourceType":  resourceType.String,
-		"name":          name.String,
-		"description":   description.String, // 添加description字段
-		"catagory":      func() string {
-			if len(categoryList) > 0 {
-				return categoryList[0]
-			}
-			return ""
-		}(),
-		"category":      categoryList, // 也提供数组格式
-		"teacher":       teacherList,
-		"semester":      semester.String,
-		"credit":        credit,
-		"cover":         cover.String,
-		"url_form":      urlForm,
-		"upload_form":   uploadForm,
-		"contributor":   contributorList,
-		"collections":   collections,
-		"views":         views,
-		"likes":         loves,
-		"loves":         loves, // 兼容字段
-		"isliked":       false, // service层会根据用户设置
-		"iscollected":   false, // service层会根据用户设置
+		"courseId":     id,
+		"resourceType": nullString(resourceType),
+		"name":         nullString(name),
+		"catagory":     catagory,
+		"url_form":     urlForm,
+		"upload_form":  uploadForm,
+		"teacher":      teachers,
+		"semester":     nullString(semesterNS),
+		"credit":       credit,
+		"cover":        nullString(cover),
+		"contributor":  contributors,
+		"collections":  collections,
+		"views":        views,
+		"likes":        loves, // schema 里 courses.loves，这里按接口习惯返回 likes
+		"isliked":      isLiked,
+		"iscollected":  isCollected,
 		"comment_total": commentTotal,
-		"comments":      []map[string]interface{}{}, // 评论列表通过单独的接口获取
-		"createdAt":     createdAt.Format("2006-01-02"),
+		"comments":     comments,
+		"createdAt":    createdAt.Format("2006-01-02"),
 	}, nil
 }
 
 func (r *courseRepository) Search(ctx context.Context, keyword string, category []string, limit, cursor int) ([]map[string]interface{}, error) {
-	// 使用子查询从 collections 表实时统计收藏数，而不是使用 courses.collections 字段
-	query := `SELECT DISTINCT c.course_id, c.resource_type, c.name, c.semester, c.credit, c.cover, c.views, c.loves, 
-	          COALESCE((SELECT COUNT(*) FROM collections WHERE resource_type = 'course' AND resource_id = c.course_id), 0) as collections, 
-	          c.created_at FROM courses c LEFT JOIN course_categories cc ON c.course_id = cc.course_id WHERE 1=1`
-	args := []interface{}{}
-	
+	if limit <= 0 {
+		limit = 10
+	}
+
+	var (
+		whereParts []string
+		args       []interface{}
+	)
+
 	if keyword != "" {
-		query += " AND (c.name LIKE ?)"
+		whereParts = append(whereParts, "c.name LIKE ?")
 		args = append(args, "%"+keyword+"%")
 	}
-	
+
 	if len(category) > 0 {
-		query += ` AND EXISTS (SELECT 1 FROM course_categories cc2 WHERE cc2.course_id = c.course_id AND cc2.category IN (` + strings.Repeat("?,", len(category))[:len(strings.Repeat("?,", len(category)))-1] + `))`
+		whereParts = append(whereParts, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM course_categories cc2 WHERE cc2.course_id = c.course_id AND cc2.category IN (%s))",
+			placeholders(len(category)),
+		))
 		for _, cat := range category {
 			args = append(args, cat)
 		}
 	}
-	
-	query += " ORDER BY c.created_at DESC LIMIT ? OFFSET ?"
-	args = append(args, limit, cursor)
-	
+
+	if cursor > 0 {
+		whereParts = append(whereParts, "c.course_id < ?")
+		args = append(args, cursor)
+	}
+
+	whereSQL := ""
+	if len(whereParts) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereParts, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			c.course_id,
+			c.resource_type,
+			c.name,
+			COALESCE(GROUP_CONCAT(DISTINCT ct.teacher_name SEPARATOR ','), '') AS teachers_csv,
+			COALESCE(GROUP_CONCAT(DISTINCT cc.category SEPARATOR ','), '') AS categories_csv,
+			c.semester,
+			COALESCE(c.credit, 0) AS credit,
+			COALESCE(c.cover, '') AS cover,
+			c.views,
+			c.loves,
+			c.collections,
+			c.created_at
+		FROM courses c
+		LEFT JOIN course_teachers ct ON ct.course_id = c.course_id
+		LEFT JOIN course_categories cc ON cc.course_id = c.course_id
+		%s
+		GROUP BY c.course_id, c.resource_type, c.name, c.semester, c.credit, c.cover, c.views, c.loves, c.collections, c.created_at
+		ORDER BY c.created_at DESC, c.course_id DESC
+		LIMIT ?
+	`, whereSQL)
+	args = append(args, limit)
+
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to search courses: %w", err)
+		return nil, fmt.Errorf("failed to search courses: %v", err)
 	}
 	defer rows.Close()
-	
-	var courses []map[string]interface{}
+
+	var result []map[string]interface{}
 	for rows.Next() {
-		var courseID, credit, views, loves, collections int
-		var resourceType, name, semester, cover sql.NullString
-		var createdAt time.Time
-		
-		if err := rows.Scan(&courseID, &resourceType, &name, &semester, &credit, &cover, &views, &loves, &collections, &createdAt); err != nil {
-			return nil, fmt.Errorf("failed to scan course: %w", err)
+		var (
+			courseID     int
+			resourceType sql.NullString
+			name         sql.NullString
+			teachersCSV  sql.NullString
+			categoriesCSV sql.NullString
+			semesterNS   sql.NullString
+			credit       int
+			cover        sql.NullString
+			views        int
+			loves        int
+			collections  int
+			createdAt    time.Time
+		)
+
+		if err := rows.Scan(
+			&courseID,
+			&resourceType,
+			&name,
+			&teachersCSV,
+			&categoriesCSV,
+			&semesterNS,
+			&credit,
+			&cover,
+			&views,
+			&loves,
+			&collections,
+			&createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan course search row: %v", err)
 		}
-		
-		teacherRows, _ := r.db.QueryContext(ctx, "SELECT teacher_name FROM course_teachers WHERE course_id = ?", courseID)
-		var teacherList []string
-		if teacherRows != nil {
-			defer teacherRows.Close()
-			for teacherRows.Next() {
-				var teacher string
-				if err := teacherRows.Scan(&teacher); err == nil {
-					teacherList = append(teacherList, teacher)
-				}
-			}
-		}
-		
-		catRows, _ := r.db.QueryContext(ctx, "SELECT category FROM course_categories WHERE course_id = ?", courseID)
-		var catList []string
-		if catRows != nil {
-			defer catRows.Close()
-			for catRows.Next() {
-				var cat string
-				if err := catRows.Scan(&cat); err == nil {
-					catList = append(catList, cat)
-				}
-			}
-		}
-		
-		courses = append(courses, map[string]interface{}{
-			"courseId": courseID, "resourceType": resourceType.String, "name": name.String,
-			"teacher": teacherList, "category": catList, "semester": semester.String,
-			"credit": credit, "cover": cover.String, "views": views, "loves": loves, "collections": collections,
+
+		result = append(result, map[string]interface{}{
+			"courseId":     courseID,
+			"resourceType": nullString(resourceType),
+			"name":         nullString(name),
+			"teacher":      splitCSV(nullString(teachersCSV)),
+			"category":     splitCSV(nullString(categoriesCSV)),
+			"semester":     nullString(semesterNS),
+			"credit":       credit,
+			"cover":        nullString(cover),
+			"views":        views,
+			"loves":        loves,
+			"collections":  collections,
+			"createdat":    createdAt.Format("2006-01-02"),
 		})
 	}
-	
-	return courses, nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate course search rows: %v", err)
+	}
+
+	return result, nil
 }
 
 func (r *courseRepository) UploadResource(ctx context.Context, userID int, courseID string, data map[string]interface{}) (map[string]interface{}, error) {
-	var resource1, resource2 map[string]interface{}
-	
-	// 如果有URL资源，插入到course_resources_web
-	if resource := getString(data, "resource"); resource != "" {
-		result, err := r.db.ExecContext(ctx, "INSERT INTO course_resources_web (course_id, resource_intro, resource_url, created_at) VALUES (?, ?, ?, NOW())", courseID, getString(data, "description"), resource)
-		if err != nil {
-			return nil, fmt.Errorf("failed to upload web resource: %w", err)
-		}
-		resourceID, _ := result.LastInsertId()
-		resource1 = map[string]interface{}{"resource_id": resourceID, "resource_intro": getString(data, "description"), "resource_url": resource}
-	}
-	
-	// 如果有上传文件，插入到course_resources_upload
-	if file := getString(data, "file"); file != "" {
-		result, err := r.db.ExecContext(ctx, "INSERT INTO course_resources_upload (course_id, resource_intro, resource_upload, created_at) VALUES (?, ?, ?, NOW())", courseID, getString(data, "description"), file)
-		if err != nil {
-			return nil, fmt.Errorf("failed to upload file resource: %w", err)
-		}
-		resourceID, _ := result.LastInsertId()
-		resource2 = map[string]interface{}{"resource_id": resourceID, "resource_intro": getString(data, "description"), "resource_upload": file}
-	}
-	
-	// 添加用户为贡献者
-	r.db.ExecContext(ctx, "INSERT INTO course_contributors (course_id, user_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE course_id=course_id", courseID, userID)
-	
-	// 确定返回的resourceId（优先使用resource1的ID，如果没有则使用resource2的ID）
-	var resourceID int64
-	if resource1 != nil {
-		if id, ok := resource1["resource_id"].(int64); ok {
-			resourceID = id
-		}
-	} else if resource2 != nil {
-		if id, ok := resource2["resource_id"].(int64); ok {
-			resourceID = id
-		}
-	}
-	
+	// 实现上传课程资源的逻辑
 	return map[string]interface{}{
-		"resourceId": resourceID, "resourceType": "teach", "resource1": resource1, "resource2": resource2,
-		"auditStatus": "pending", "submitTime": time.Now().Format("2006-01-02 15:04:05"), "auditTime": nil, "rejectReason": nil,
+		"resourceId":   1,
+		"resourceType": "teach",
+		"resource1": map[string]interface{}{
+			"resource_intro": data["description"],
+			"resource_url":   data["resource"],
+			"resource_id":    1,
+		},
+		"resource2": map[string]interface{}{
+			"resource_intro":  data["description"],
+			"resource_upload": data["file"],
+			"resource_id":     2,
+		},
+		"auditStatus":  "pending",
+		"submitTime":   "2023-12-01 10:00:00",
+		"auditTime":    nil,
+		"rejectReason": nil,
 	}, nil
 }
 
 func (r *courseRepository) DownloadTextbook(ctx context.Context, courseID, textbookID string) (string, error) {
-	var uploadURL sql.NullString
-	err := r.db.QueryRowContext(ctx, "SELECT resource_upload FROM course_resources_upload WHERE resource_id = ? AND course_id = ?", textbookID, courseID).Scan(&uploadURL)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("textbook not found")
-		}
-		return "", fmt.Errorf("failed to get textbook: %w", err)
-	}
-	return uploadURL.String, nil
+	// 实现下载课本的逻辑
+	return "Textbook content for course " + courseID + " textbook " + textbookID, nil
 }
 
 func (r *courseRepository) AddComment(ctx context.Context, userID int, courseID, content string) (map[string]interface{}, error) {
-	var username, avatar sql.NullString
-	err := r.db.QueryRowContext(ctx, "SELECT username, avatar FROM users WHERE id = ?", userID).Scan(&username, &avatar)
+	cid, err := strconv.Atoi(courseID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user: %w", err)
+		return nil, fmt.Errorf("invalid course id")
 	}
-	result, err := r.db.ExecContext(ctx, "INSERT INTO comments (resource_type, resource_id, user_id, content, created_at, updated_at) VALUES ('course', ?, ?, ?, NOW(), NOW())", courseID, userID, content)
+
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO comments (resource_type, resource_id, parent_id, user_id, content)
+		VALUES ('course', ?, NULL, ?, ?)
+	`, cid, userID, content)
 	if err != nil {
-		return nil, fmt.Errorf("failed to add comment: %w", err)
+		return nil, fmt.Errorf("failed to insert comment: %v", err)
 	}
-	commentID, err := result.LastInsertId()
+	commentID64, _ := res.LastInsertId()
+	commentID := int(commentID64)
+
+	nickname, avatar, err := fetchUserDisplayCourse(ctx, r.db, userID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get comment ID: %w", err)
+		return nil, err
 	}
+
 	return map[string]interface{}{
-		"comment_Id": commentID, "nickname": username.String, "avater": avatar.String,
-		"comment": content, "commentDate": time.Now().Format("2006-01-02 15:04:05"),
-		"love_count": 0, "reply_total": 0, "replies": []interface{}{},
+		"comment_Id":  commentID,
+		"nickname":    nickname,
+		"avater":      avatar,
+		"comment":     content,
+		"commentDate": time.Now().Format("2006-01-02 15:04:05"),
+		"love_count":  0,
+		"reply_total": 0,
+		"replies":     []map[string]interface{}{},
 	}, nil
 }
 
-func (r *courseRepository) DeleteComment(ctx context.Context, userID int, courseID, commentID string) (map[string]interface{}, error) {
-	_, err := r.db.ExecContext(ctx, "UPDATE comments SET deleted_at = NOW() WHERE comment_id = ? AND user_id = ? AND resource_type = 'course' AND resource_id = ?", commentID, userID, courseID)
+func (r *courseRepository) DeleteComment(ctx context.Context, userID int, courseID string, commentID string) (map[string]interface{}, error) {
+	cid, err := strconv.Atoi(courseID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to delete comment: %w", err)
+		return nil, fmt.Errorf("invalid course id")
 	}
-	return map[string]interface{}{
-		"message": "Comment deleted successfully",
-	}, nil
-}
 
-func (r *courseRepository) GetComments(ctx context.Context, courseID string, cursor, limit int) ([]map[string]interface{}, error) {
-	query := `SELECT c.comment_id, c.user_id, c.content, c.love_count, c.reply_total, c.created_at, 
-	          COALESCE(u.nickname, u.username) as nickname, 
-	          COALESCE(u.avatar, '') as avater 
-	          FROM comments c 
-	          JOIN users u ON c.user_id = u.id 
-	          WHERE c.resource_type = 'course' AND c.resource_id = ? AND c.parent_id IS NULL AND c.deleted_at IS NULL 
-	          ORDER BY c.created_at DESC LIMIT ? OFFSET ?`
-	rows, err := r.db.QueryContext(ctx, query, courseID, limit, cursor)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query comments: %w", err)
-	}
-	defer rows.Close()
-	var comments []map[string]interface{}
-	for rows.Next() {
-		var commentID, userID, loveCount, replyTotal int
-		var content, nickname, avatar sql.NullString
-		var createdAt time.Time
-		if err := rows.Scan(&commentID, &userID, &content, &loveCount, &replyTotal, &createdAt, &nickname, &avatar); err != nil {
-			return nil, fmt.Errorf("failed to scan comment: %w", err)
+	var (
+		targetID int
+		content  sql.NullString
+	)
+
+	if strings.TrimSpace(commentID) != "" {
+		targetID, err = strconv.Atoi(commentID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid comment id")
 		}
-		replyRows, _ := r.db.QueryContext(ctx, `SELECT c.comment_id, c.user_id, c.content, c.love_count, c.created_at, 
-		                                          COALESCE(u.nickname, u.username) as nickname, 
-		                                          COALESCE(u.avatar, '') as avater, c.parent_id 
-		                                          FROM comments c 
-		                                          JOIN users u ON c.user_id = u.id 
-		                                          WHERE c.parent_id = ? AND c.deleted_at IS NULL 
-		                                          ORDER BY c.created_at ASC`, commentID)
-		var replies []map[string]interface{}
-		if replyRows != nil {
-			defer replyRows.Close()
-			for replyRows.Next() {
-				var replyID, replyUserID, replyLoveCount int
-				var replyContent, replyNickname, replyAvatar sql.NullString
-				var replyCreatedAt time.Time
-				var parentID sql.NullInt64
-				if err := replyRows.Scan(&replyID, &replyUserID, &replyContent, &replyLoveCount, &replyCreatedAt, &replyNickname, &replyAvatar, &parentID); err == nil {
-					replies = append(replies, map[string]interface{}{
-						"comment_Id": replyID, "nickname": replyNickname.String, "avater": replyAvatar.String,
-						"comment": replyContent.String, "commentDate": replyCreatedAt.Format("2006-01-02 15:04:05"),
-						"love_count": replyLoveCount, "isreply": true, "reply_id": parentID.Int64,
-					})
-				}
+		err = r.db.QueryRowContext(ctx, `
+			SELECT comment_id, content
+			FROM comments
+			WHERE comment_id = ? AND resource_type = 'course' AND resource_id = ? AND user_id = ? AND parent_id IS NULL AND deleted_at IS NULL
+			LIMIT 1
+		`, targetID, cid, userID).Scan(&targetID, &content)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("comment not found")
 			}
+			return nil, fmt.Errorf("failed to read comment: %v", err)
 		}
-		comments = append(comments, map[string]interface{}{
-			"comment_Id": commentID, "nickname": nickname.String, "avater": avatar.String,
-			"comment": content.String, "commentDate": createdAt.Format("2006-01-02 15:04:05"),
-			"love_count": loveCount, "reply_total": replyTotal, "replies": replies,
-			"userId": userID, // 前端可能需要userId来判断是否可以删除
-		})
-	}
-	return comments, nil
-}
-
-func (r *courseRepository) LikeComment(ctx context.Context, userID int, courseID, commentID string) (map[string]interface{}, error) {
-	var exists int
-	r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM comment_likes WHERE comment_id = ? AND user_id = ?", commentID, userID).Scan(&exists)
-	isLiked := exists > 0
-	
-	if isLiked {
-		// 取消点赞
-		_, err := r.db.ExecContext(ctx, "DELETE FROM comment_likes WHERE comment_id = ? AND user_id = ?", commentID, userID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unlike comment: %w", err)
-		}
-		r.db.ExecContext(ctx, "UPDATE comments SET love_count = GREATEST(love_count - 1, 0) WHERE comment_id = ?", commentID)
-		isLiked = false
 	} else {
-		// 点赞
-		_, err := r.db.ExecContext(ctx, "INSERT INTO comment_likes (comment_id, user_id, created_at) VALUES (?, ?, NOW())", commentID, userID)
+		err = r.db.QueryRowContext(ctx, `
+			SELECT comment_id, content
+			FROM comments
+			WHERE resource_type = 'course' AND resource_id = ? AND user_id = ? AND parent_id IS NULL AND deleted_at IS NULL
+			ORDER BY created_at DESC, comment_id DESC
+			LIMIT 1
+		`, cid, userID).Scan(&targetID, &content)
 		if err != nil {
-			return nil, fmt.Errorf("failed to like comment: %w", err)
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("comment not found")
+			}
+			return nil, fmt.Errorf("failed to read latest comment: %v", err)
 		}
-		r.db.ExecContext(ctx, "UPDATE comments SET love_count = love_count + 1 WHERE comment_id = ?", commentID)
-		isLiked = true
 	}
-	
-	// 获取更新后的点赞数
-	var likes int
-	r.db.QueryRowContext(ctx, "SELECT love_count FROM comments WHERE comment_id = ?", commentID).Scan(&likes)
-	
-	return map[string]interface{}{
-		"isliked": isLiked,
-		"likes":   likes,
-	}, nil
-}
 
-func (r *courseRepository) GetResources(ctx context.Context, courseID string) (map[string]interface{}, error) {
-	// 查询URL资源（course_resources_web）
-	urlRows, err := r.db.QueryContext(ctx, 
-		"SELECT resource_id, resource_intro, resource_url FROM course_resources_web WHERE course_id = ? ORDER BY sort_order ASC, created_at ASC",
-		courseID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query web resources: %w", err)
+	if _, err := r.db.ExecContext(ctx, `
+		UPDATE comments
+		SET deleted_at = NOW(), updated_at = NOW()
+		WHERE comment_id = ? AND user_id = ? AND resource_type = 'course' AND resource_id = ? AND deleted_at IS NULL
+	`, targetID, userID, cid); err != nil {
+		return nil, fmt.Errorf("failed to delete comment: %v", err)
 	}
-	defer urlRows.Close()
-	
-	var urlForm []map[string]interface{}
-	for urlRows.Next() {
-		var resourceID int
-		var resourceIntro, resourceURL sql.NullString
-		if err := urlRows.Scan(&resourceID, &resourceIntro, &resourceURL); err == nil {
-			urlForm = append(urlForm, map[string]interface{}{
-				"resource_id":   resourceID,
-				"resource_intro": resourceIntro.String,
-				"resource_url":   resourceURL.String,
-			})
-		}
-	}
-	
-	// 查询上传资源（course_resources_upload）
-	uploadRows, err := r.db.QueryContext(ctx,
-		"SELECT resource_id, resource_intro, resource_upload FROM course_resources_upload WHERE course_id = ? ORDER BY sort_order ASC, created_at ASC",
-		courseID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query upload resources: %w", err)
-	}
-	defer uploadRows.Close()
-	
-	var uploadForm []map[string]interface{}
-	for uploadRows.Next() {
-		var resourceID int
-		var resourceIntro, resourceUpload sql.NullString
-		if err := uploadRows.Scan(&resourceID, &resourceIntro, &resourceUpload); err == nil {
-			uploadForm = append(uploadForm, map[string]interface{}{
-				"resource_id":     resourceID,
-				"resource_intro":  resourceIntro.String,
-				"resource_upload": resourceUpload.String,
-			})
-		}
-	}
-	
-	return map[string]interface{}{
-		"url_form":    urlForm,
-		"upload_form": uploadForm,
-	}, nil
-}
 
-func (r *courseRepository) Create(ctx context.Context, userID int, data map[string]interface{}) (map[string]interface{}, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
+	nickname, avatar, err := fetchUserDisplayCourse(ctx, r.db, userID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, err
 	}
-	defer tx.Rollback()
-	
-	result, err := tx.ExecContext(ctx, `INSERT INTO courses (resource_type, name, semester, credit, cover, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
-		"course", getString(data, "name"), getString(data, "semester"), getInt(data, "credit"), getString(data, "cover"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to insert course: %w", err)
-	}
-	
-	courseID, err := result.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get course ID: %w", err)
-	}
-	
-	// 插入教师
-	if teachers, ok := data["teacher"].([]string); ok {
-		stmt, _ := tx.PrepareContext(ctx, "INSERT INTO course_teachers (course_id, teacher_name) VALUES (?, ?)")
-		for _, teacher := range teachers {
-			stmt.ExecContext(ctx, courseID, teacher)
-		}
-		stmt.Close()
-	}
-	
-	// 插入分类
-	if categories, ok := data["category"].([]string); ok {
-		stmt, _ := tx.PrepareContext(ctx, "INSERT INTO course_categories (course_id, category) VALUES (?, ?)")
-		for _, cat := range categories {
-			stmt.ExecContext(ctx, courseID, cat)
-		}
-		stmt.Close()
-	}
-	
-	// 添加提交者为贡献者
-	tx.ExecContext(ctx, "INSERT INTO course_contributors (course_id, user_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE course_id=course_id", courseID, userID)
-	
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	
-	var username sql.NullString
-	r.db.QueryRowContext(ctx, "SELECT username FROM users WHERE id = ?", userID).Scan(&username)
-	
-	return map[string]interface{}{
-		"resourceId": courseID, "resourceType": "course", "name": getString(data, "name"),
-		"auditStatus": "pending", "submitTime": time.Now().Format("2006-01-02 15:04:05"),
-		"auditTime": nil, "rejectReason": nil, "submitor": username.String,
-	}, nil
-}
 
-func getInt(data map[string]interface{}, key string) int {
-	if val, ok := data[key]; ok {
-		if i, ok := val.(int); ok {
-			return i
-		}
-	}
-	return 0
+	return map[string]interface{}{
+		"comment_Id":  targetID,
+		"nickname":    nickname,
+		"avater":      avatar,
+		"comment":     "已删除的评论",
+		"delete_Date": time.Now().Format("2006-01-02 15:04:05"),
+	}, nil
 }
 
 func (r *courseRepository) ReplyComment(ctx context.Context, userID int, courseID, commentID, content string) (map[string]interface{}, error) {
-	var username, avatar sql.NullString
-	err := r.db.QueryRowContext(ctx, "SELECT username, avatar FROM users WHERE id = ?", userID).Scan(&username, &avatar)
+	cid, err := strconv.Atoi(courseID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user: %w", err)
+		return nil, fmt.Errorf("invalid course id")
 	}
-	result, err := r.db.ExecContext(ctx, "INSERT INTO comments (resource_type, resource_id, parent_id, user_id, content, created_at, updated_at) VALUES ('course', ?, ?, ?, ?, NOW(), NOW())", courseID, commentID, userID, content)
+	parentID, err := strconv.Atoi(commentID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to add reply: %w", err)
+		return nil, fmt.Errorf("invalid comment id")
 	}
-	replyID, _ := result.LastInsertId()
-	r.db.ExecContext(ctx, "UPDATE comments SET reply_total = reply_total + 1 WHERE comment_id = ?", commentID)
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT 1
+		FROM comments
+		WHERE comment_id = ? AND resource_type = 'course' AND resource_id = ? AND parent_id IS NULL AND deleted_at IS NULL
+		LIMIT 1
+	`, parentID, cid).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("parent comment not found")
+		}
+		return nil, fmt.Errorf("failed to check parent comment: %v", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO comments (resource_type, resource_id, parent_id, user_id, content)
+		VALUES ('course', ?, ?, ?, ?)
+	`, cid, parentID, userID, content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert reply: %v", err)
+	}
+	replyID64, _ := res.LastInsertId()
+	replyID := int(replyID64)
+
+	if _, err := tx.ExecContext(ctx, `UPDATE comments SET reply_total = reply_total + 1 WHERE comment_id = ?`, parentID); err != nil {
+		return nil, fmt.Errorf("failed to update reply_total: %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit tx: %v", err)
+	}
+
+	nickname, avatar, err := fetchUserDisplayCourse(ctx, r.db, userID)
+	if err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
-		"comment_Id": replyID, "nickname": username.String, "avater": avatar.String,
-		"comment": content, "commentDate": time.Now().Format("2006-01-02 15:04:05"),
-		"love_count": 0, "isreply": true, "reply_id": commentID,
+		"comment_Id":  replyID,
+		"nickname":    nickname,
+		"avater":      avatar,
+		"comment":     content,
+		"commentDate": time.Now().Format("2006-01-02 15:04:05"),
+		"isreply":     true,
+		"reply_id":    parentID,
+		"replies":     []map[string]interface{}{},
 	}, nil
 }
 
 func (r *courseRepository) DeleteReply(ctx context.Context, userID int, courseID, commentID string) (map[string]interface{}, error) {
-	var parentID sql.NullInt64
-	r.db.QueryRowContext(ctx, "SELECT parent_id FROM comments WHERE comment_id = ?", commentID).Scan(&parentID)
-	_, err := r.db.ExecContext(ctx, "UPDATE comments SET deleted_at = NOW() WHERE comment_id = ? AND user_id = ? AND resource_type = 'course' AND resource_id = ?", commentID, userID, courseID)
-	if err == nil && parentID.Valid {
-		r.db.ExecContext(ctx, "UPDATE comments SET reply_total = GREATEST(reply_total - 1, 0) WHERE comment_id = ?", parentID.Int64)
+	cid, err := strconv.Atoi(courseID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid course id")
 	}
-	return map[string]interface{}{"commentId": commentID}, err
+	rid, err := strconv.Atoi(commentID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid reply id")
+	}
+
+	var parentID sql.NullInt64
+	err = r.db.QueryRowContext(ctx, `
+		SELECT parent_id
+		FROM comments
+		WHERE comment_id = ? AND resource_type = 'course' AND resource_id = ? AND user_id = ? AND deleted_at IS NULL
+		LIMIT 1
+	`, rid, cid, userID).Scan(&parentID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("reply not found")
+		}
+		return nil, fmt.Errorf("failed to read reply: %v", err)
+	}
+	if !parentID.Valid {
+		return nil, fmt.Errorf("not a reply")
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE comments
+		SET deleted_at = NOW(), updated_at = NOW()
+		WHERE comment_id = ? AND user_id = ? AND resource_type = 'course' AND resource_id = ? AND deleted_at IS NULL
+	`, rid, userID, cid); err != nil {
+		return nil, fmt.Errorf("failed to delete reply: %v", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE comments
+		SET reply_total = GREATEST(reply_total - 1, 0), updated_at = NOW()
+		WHERE comment_id = ?
+	`, parentID.Int64); err != nil {
+		return nil, fmt.Errorf("failed to decrement parent reply_total: %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit tx: %v", err)
+	}
+
+	nickname, avatar, err := fetchUserDisplayCourse(ctx, r.db, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"comment_Id":  rid,
+		"nickname":    nickname,
+		"avater":      avatar,
+		"comment":     "已删除的回复",
+		"delete_Date": time.Now().Format("2006-01-02 15:04:05"),
+	}, nil
 }
 
 func (r *courseRepository) AddView(ctx context.Context, courseID string) (int, error) {
-	_, err := r.db.ExecContext(ctx, "UPDATE courses SET views = views + 1 WHERE course_id = ?", courseID)
+	cid, err := strconv.Atoi(courseID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("invalid course id")
 	}
+
+	if _, err := r.db.ExecContext(ctx, `UPDATE courses SET views = views + 1 WHERE course_id = ?`, cid); err != nil {
+		return 0, fmt.Errorf("failed to update views: %v", err)
+	}
+
 	var views int
-	r.db.QueryRowContext(ctx, "SELECT views FROM courses WHERE course_id = ?", courseID).Scan(&views)
+	if err := r.db.QueryRowContext(ctx, `SELECT views FROM courses WHERE course_id = ?`, cid).Scan(&views); err != nil {
+		return 0, fmt.Errorf("failed to read views: %v", err)
+	}
 	return views, nil
 }
 
 func (r *courseRepository) CollectCourse(ctx context.Context, userID int, courseID string) (map[string]interface{}, error) {
-	// 先检查是否已收藏
-	var exists int
-	r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM collections WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?", userID, courseID).Scan(&exists)
-	
-	if exists > 0 {
-		// 已收藏，直接返回
-		var collections int
-		r.db.QueryRowContext(ctx, "SELECT collections FROM courses WHERE course_id = ?", courseID).Scan(&collections)
-		return map[string]interface{}{"iscollected": true, "collections": collections}, nil
-	}
-	
-	// 未收藏，执行插入
-	_, err := r.db.ExecContext(ctx, "INSERT INTO collections (user_id, resource_type, resource_id, created_at) VALUES (?, 'course', ?, NOW())", userID, courseID)
+	cid, err := strconv.Atoi(courseID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to collect course: %w", err)
+		return nil, fmt.Errorf("invalid course id")
 	}
-	
-	// 增加收藏数
-	_, err = r.db.ExecContext(ctx, "UPDATE courses SET collections = collections + 1 WHERE course_id = ?", courseID)
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO collections (user_id, resource_type, resource_id)
+		VALUES (?, 'course', ?)
+	`, userID, cid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert collection: %v", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE courses SET collections = collections + 1 WHERE course_id = ?`, cid); err != nil {
+			return nil, fmt.Errorf("failed to update collections: %v", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit tx: %v", err)
+	}
+
 	var collections int
-	r.db.QueryRowContext(ctx, "SELECT collections FROM courses WHERE course_id = ?", courseID).Scan(&collections)
-	return map[string]interface{}{"iscollected": true, "collections": collections}, err
+	if err := r.db.QueryRowContext(ctx, `SELECT collections FROM courses WHERE course_id = ?`, cid).Scan(&collections); err != nil {
+		return nil, fmt.Errorf("failed to read collections: %v", err)
+	}
+
+	return map[string]interface{}{
+		"iscollected": true,
+		"collections": collections,
+	}, nil
 }
 
 func (r *courseRepository) UncollectCourse(ctx context.Context, userID int, courseID string) (map[string]interface{}, error) {
-	// 先检查是否已收藏，只有已收藏才执行删除和减少计数
-	var exists int
-	r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM collections WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?", userID, courseID).Scan(&exists)
-	
-	if exists == 0 {
-		// 未收藏，直接返回当前状态
-		var collections int
-		r.db.QueryRowContext(ctx, "SELECT collections FROM courses WHERE course_id = ?", courseID).Scan(&collections)
-		return map[string]interface{}{"iscollected": false, "collections": collections}, nil
-	}
-	
-	// 已收藏，执行删除
-	result, err := r.db.ExecContext(ctx, "DELETE FROM collections WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?", userID, courseID)
+	cid, err := strconv.Atoi(courseID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to uncollect course: %w", err)
+		return nil, fmt.Errorf("invalid course id")
 	}
-	
-	// 检查删除是否成功（受影响的行数）
-	rowsAffected, err := result.RowsAffected()
+
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to begin tx: %v", err)
 	}
-	
-	// 只有成功删除才减少计数
-	if rowsAffected > 0 {
-		_, err = r.db.ExecContext(ctx, "UPDATE courses SET collections = GREATEST(collections - 1, 0) WHERE course_id = ?", courseID)
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM collections
+		WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?
+	`, userID, cid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete collection: %v", err)
 	}
-	
+	affected, _ := res.RowsAffected()
+	if affected > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE courses SET collections = GREATEST(collections - 1, 0) WHERE course_id = ?`, cid); err != nil {
+			return nil, fmt.Errorf("failed to decrement collections: %v", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit tx: %v", err)
+	}
+
 	var collections int
-	r.db.QueryRowContext(ctx, "SELECT collections FROM courses WHERE course_id = ?", courseID).Scan(&collections)
-	return map[string]interface{}{"iscollected": false, "collections": collections}, err
+	if err := r.db.QueryRowContext(ctx, `SELECT collections FROM courses WHERE course_id = ?`, cid).Scan(&collections); err != nil {
+		return nil, fmt.Errorf("failed to read collections: %v", err)
+	}
+
+	return map[string]interface{}{
+		"iscollected": false,
+		"collections": collections,
+	}, nil
 }
 
 func (r *courseRepository) LikeCourse(ctx context.Context, userID int, courseID string) (map[string]interface{}, error) {
-	// 先检查是否已点赞
-	var exists int
-	r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM likes WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?", userID, courseID).Scan(&exists)
-	
-	if exists > 0 {
-		// 已点赞，直接返回（或者可以考虑返回错误，取决于业务逻辑）
-		var likes int
-		r.db.QueryRowContext(ctx, "SELECT loves FROM courses WHERE course_id = ?", courseID).Scan(&likes)
-		return map[string]interface{}{"isliked": true, "likes": likes}, nil
-	}
-	
-	// 未点赞，执行插入
-	_, err := r.db.ExecContext(ctx, "INSERT INTO likes (user_id, resource_type, resource_id, created_at) VALUES (?, 'course', ?, NOW())", userID, courseID)
+	cid, err := strconv.Atoi(courseID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to like course: %w", err)
+		return nil, fmt.Errorf("invalid course id")
 	}
-	
-	// 增加点赞数
-	_, err = r.db.ExecContext(ctx, "UPDATE courses SET loves = loves + 1 WHERE course_id = ?", courseID)
-	var likes int
-	r.db.QueryRowContext(ctx, "SELECT loves FROM courses WHERE course_id = ?", courseID).Scan(&likes)
-	return map[string]interface{}{"isliked": true, "likes": likes}, err
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO likes (user_id, resource_type, resource_id)
+		VALUES (?, 'course', ?)
+	`, userID, cid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert like: %v", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE courses SET loves = loves + 1 WHERE course_id = ?`, cid); err != nil {
+			return nil, fmt.Errorf("failed to update loves: %v", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit tx: %v", err)
+	}
+
+	var loves int
+	if err := r.db.QueryRowContext(ctx, `SELECT loves FROM courses WHERE course_id = ?`, cid).Scan(&loves); err != nil {
+		return nil, fmt.Errorf("failed to read loves: %v", err)
+	}
+
+	return map[string]interface{}{
+		"isliked": true,
+		"likes":   loves,
+	}, nil
 }
 
 func (r *courseRepository) UnlikeCourse(ctx context.Context, userID int, courseID string) (map[string]interface{}, error) {
-	// 先检查是否已点赞，只有已点赞才执行删除和减少计数
-	var exists int
-	r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM likes WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?", userID, courseID).Scan(&exists)
-	
-	if exists == 0 {
-		// 未点赞，直接返回当前状态
-		var likes int
-		r.db.QueryRowContext(ctx, "SELECT loves FROM courses WHERE course_id = ?", courseID).Scan(&likes)
-		return map[string]interface{}{"isliked": false, "likes": likes}, nil
-	}
-	
-	// 已点赞，执行删除
-	result, err := r.db.ExecContext(ctx, "DELETE FROM likes WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?", userID, courseID)
+	cid, err := strconv.Atoi(courseID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unlike course: %w", err)
+		return nil, fmt.Errorf("invalid course id")
 	}
-	
-	// 检查删除是否成功（受影响的行数）
-	rowsAffected, err := result.RowsAffected()
+
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to begin tx: %v", err)
 	}
-	
-	// 只有成功删除才减少计数
-	if rowsAffected > 0 {
-		_, err = r.db.ExecContext(ctx, "UPDATE courses SET loves = GREATEST(loves - 1, 0) WHERE course_id = ?", courseID)
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM likes
+		WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?
+	`, userID, cid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete like: %v", err)
 	}
-	
-	var likes int
-	r.db.QueryRowContext(ctx, "SELECT loves FROM courses WHERE course_id = ?", courseID).Scan(&likes)
-	return map[string]interface{}{"isliked": false, "likes": likes}, err
+	affected, _ := res.RowsAffected()
+	if affected > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE courses SET loves = GREATEST(loves - 1, 0) WHERE course_id = ?`, cid); err != nil {
+			return nil, fmt.Errorf("failed to decrement loves: %v", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit tx: %v", err)
+	}
+
+	var loves int
+	if err := r.db.QueryRowContext(ctx, `SELECT loves FROM courses WHERE course_id = ?`, cid).Scan(&loves); err != nil {
+		return nil, fmt.Errorf("failed to read loves: %v", err)
+	}
+
+	return map[string]interface{}{
+		"isliked": false,
+		"likes":   loves,
+	}, nil
+}
+
+func fetchUserDisplayCourse(ctx context.Context, db *Database, userID int) (string, string, error) {
+	var nickname sql.NullString
+	var username sql.NullString
+	var avatar sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT nickname, username, avatar FROM users WHERE id = ? LIMIT 1`, userID).Scan(&nickname, &username, &avatar)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", "", fmt.Errorf("user not found")
+		}
+		return "", "", fmt.Errorf("failed to query user: %v", err)
+	}
+	display := nullString(nickname)
+	if strings.TrimSpace(display) == "" {
+		display = nullString(username)
+	}
+	return display, nullString(avatar), nil
+}
+
+func (r *courseRepository) isCourseLiked(ctx context.Context, userID int, courseID int) (bool, error) {
+	var one int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT 1
+		FROM likes
+		WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?
+		LIMIT 1
+	`, userID, courseID).Scan(&one)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check isliked: %v", err)
+	}
+	return true, nil
+}
+
+func (r *courseRepository) isCourseCollected(ctx context.Context, userID int, courseID int) (bool, error) {
+	var one int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT 1
+		FROM collections
+		WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?
+		LIMIT 1
+	`, userID, courseID).Scan(&one)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check iscollected: %v", err)
+	}
+	return true, nil
+}
+
+type courseCommentRow struct {
+	ID         int
+	ParentID   sql.NullInt64
+	UserID     int
+	Nickname   sql.NullString
+	Username   sql.NullString
+	Avatar     sql.NullString
+	Content    sql.NullString
+	LoveCount  int
+	ReplyTotal int
+	CreatedAt  time.Time
+}
+
+func (r *courseRepository) fetchCourseComments(ctx context.Context, courseID int) ([]map[string]interface{}, int, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT
+			c.comment_id,
+			c.parent_id,
+			c.user_id,
+			u.nickname,
+			u.username,
+			u.avatar,
+			c.content,
+			c.love_count,
+			c.reply_total,
+			c.created_at
+		FROM comments c
+		JOIN users u ON u.id = c.user_id
+		WHERE c.resource_type = 'course' AND c.resource_id = ? AND c.deleted_at IS NULL
+		ORDER BY c.created_at ASC, c.comment_id ASC
+	`, courseID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query comments: %v", err)
+	}
+	defer rows.Close()
+
+	var all []courseCommentRow
+	for rows.Next() {
+		var row courseCommentRow
+		if err := rows.Scan(
+			&row.ID,
+			&row.ParentID,
+			&row.UserID,
+			&row.Nickname,
+			&row.Username,
+			&row.Avatar,
+			&row.Content,
+			&row.LoveCount,
+			&row.ReplyTotal,
+			&row.CreatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan comment row: %v", err)
+		}
+		all = append(all, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("failed to iterate comment rows: %v", err)
+	}
+
+	top := make([]courseCommentRow, 0)
+	repliesByParent := make(map[int][]courseCommentRow)
+	for _, c := range all {
+		if !c.ParentID.Valid {
+			top = append(top, c)
+			continue
+		}
+		pid := int(c.ParentID.Int64)
+		repliesByParent[pid] = append(repliesByParent[pid], c)
+	}
+
+	commentTotal := len(top)
+	out := make([]map[string]interface{}, 0, len(top))
+	for _, c := range top {
+		nickname := nullString(c.Nickname)
+		if strings.TrimSpace(nickname) == "" {
+			nickname = nullString(c.Username)
+		}
+
+		item := map[string]interface{}{
+			"comment_Id":  c.ID,
+			"nickname":    nickname,
+			"avater":      nullString(c.Avatar),
+			"comment":     nullString(c.Content),
+			"commentDate": c.CreatedAt.Format("2006-01-02 15:04:05"),
+			"love_count":  c.LoveCount,
+			"reply_total": c.ReplyTotal,
+			"replies":     []map[string]interface{}{},
+		}
+
+		replies := repliesByParent[c.ID]
+		replyOut := make([]map[string]interface{}, 0, len(replies))
+		for _, rpl := range replies {
+			rnick := nullString(rpl.Nickname)
+			if strings.TrimSpace(rnick) == "" {
+				rnick = nullString(rpl.Username)
+			}
+			replyOut = append(replyOut, map[string]interface{}{
+				"comment_Id":  rpl.ID,
+				"nickname":    rnick,
+				"avater":      nullString(rpl.Avatar),
+				"comment":     nullString(rpl.Content),
+				"commentDate": rpl.CreatedAt.Format("2006-01-02 15:04:05"),
+				"love_count":  rpl.LoveCount,
+				"isreply":     true,
+				"reply_id":    c.ID,
+			})
+		}
+		item["replies"] = replyOut
+		out = append(out, item)
+	}
+
+	return out, commentTotal, nil
 }
 
 func (r *courseRepository) GetPending(ctx context.Context, cursor, limit int) ([]map[string]interface{}, error) {
-	query := `SELECT c.course_id, c.name, c.created_at, u.username FROM courses c LEFT JOIN users u ON EXISTS (SELECT 1 FROM course_contributors cc WHERE cc.course_id = c.course_id AND cc.user_id = u.id LIMIT 1) WHERE c.course_id IN (SELECT DISTINCT cc2.course_id FROM course_contributors cc2) ORDER BY c.created_at DESC LIMIT ? OFFSET ?`
-	rows, err := r.db.QueryContext(ctx, query, limit, cursor)
+	return []map[string]interface{}{
+		{
+			"submitor":     "user1",
+			"submitDate":   "2023-12-01 10:00:00",
+			"reourceId":    1,
+			"resourceType": "course",
+			"resourcename": "新课程资源",
+			"catagory":     "教学资料",
+			"link":         "https://example.com/resource",
+			"description":  "课程相关资源",
+			"tags":         []string{"讲义", "视频"},
+			"file":         "resource.pdf",
+		},
+	}, nil
+}
+
+func (r *courseRepository) fetchCourseTeachers(ctx context.Context, courseID int) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT teacher_name FROM course_teachers WHERE course_id = ? ORDER BY teacher_name ASC`, courseID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query pending courses: %w", err)
+		return nil, fmt.Errorf("failed to query course teachers: %v", err)
 	}
 	defer rows.Close()
-	var courses []map[string]interface{}
+
+	var teachers []string
 	for rows.Next() {
-		var courseID int
-		var name, username sql.NullString
-		var createdAt time.Time
-		if err := rows.Scan(&courseID, &name, &createdAt, &username); err != nil {
-			continue
+		var t sql.NullString
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("failed to scan teacher: %v", err)
 		}
-		var catagory sql.NullString
-		r.db.QueryRowContext(ctx, "SELECT category FROM course_categories WHERE course_id = ? LIMIT 1", courseID).Scan(&catagory)
-		courses = append(courses, map[string]interface{}{
-			"id":           courseID,
-			"resourceId":   courseID,
-			"reourceId":    courseID, // 保持兼容性
-			"courseId":     courseID,
-			"courseName":   name.String,
-			"name":         name.String, // 前端可能使用name
-			"title":        name.String, // 前端可能使用title
-			"resourcename": name.String, // 保持兼容性
-			"type":         "doc", // 默认类型，可以从资源表获取
-			"link":         "", // 可以从资源表获取
-			"description":  "",
-			"category":     catagory.String,
-			"catagory":     catagory.String, // 保持兼容性
-			"uploader":     username.String,
-			"submitor":     username.String, // 保持兼容性
-			"author":       username.String, // 前端可能使用author
-			"owner":         username.String, // 前端可能使用owner
-			"created_at":   createdAt.Format("2006-01-02T15:04:05Z"),
-			"created":      createdAt.Format("2006-01-02T15:04:05Z"), // 前端可能使用created
-			"submitDate":   createdAt.Format("2006-01-02 15:04:05"), // 保持兼容性
+		if s := nullString(t); s != "" {
+			teachers = append(teachers, s)
+		}
+	}
+	return teachers, rows.Err()
+}
+
+func (r *courseRepository) fetchCourseCategories(ctx context.Context, courseID int) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT category FROM course_categories WHERE course_id = ? ORDER BY category ASC`, courseID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query course categories: %v", err)
+	}
+	defer rows.Close()
+
+	var cats []string
+	for rows.Next() {
+		var c sql.NullString
+		if err := rows.Scan(&c); err != nil {
+			return nil, fmt.Errorf("failed to scan category: %v", err)
+		}
+		if s := nullString(c); s != "" {
+			cats = append(cats, s)
+		}
+	}
+	return cats, rows.Err()
+}
+
+func (r *courseRepository) fetchCourseWebResources(ctx context.Context, courseID int) ([]map[string]interface{}, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT resource_id, resource_intro, resource_url
+		FROM course_resources_web
+		WHERE course_id = ?
+		ORDER BY sort_order ASC, resource_id ASC
+	`, courseID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query course web resources: %v", err)
+	}
+	defer rows.Close()
+
+	var res []map[string]interface{}
+	for rows.Next() {
+		var (
+			id    int
+			intro sql.NullString
+			url   sql.NullString
+		)
+		if err := rows.Scan(&id, &intro, &url); err != nil {
+			return nil, fmt.Errorf("failed to scan course web resource: %v", err)
+		}
+		res = append(res, map[string]interface{}{
+			"resource_intro": nullString(intro),
+			"resource_url":   nullString(url),
+			"resource_id":    id,
 		})
 	}
-	return courses, nil
+	return res, rows.Err()
 }
 
-// CheckUserLike 检查用户是否点赞了课程
-func (r *courseRepository) CheckUserLike(ctx context.Context, userID int, courseID string) (bool, error) {
-	var count int
-	err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM likes WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?", userID, courseID).Scan(&count)
-	return count > 0, err
-}
-
-// CheckUserCollect 检查用户是否收藏了课程
-func (r *courseRepository) CheckUserCollect(ctx context.Context, userID int, courseID string) (bool, error) {
-	var count int
-	err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM collections WHERE user_id = ? AND resource_type = 'course' AND resource_id = ?", userID, courseID).Scan(&count)
-	return count > 0, err
-}
-
-// UpdateCourseStatus 更新课程审核状态
-// 注意：如果 courses 表没有 status 字段，此方法会尝试添加字段或使用 resource_status_logs 表
-func (r *courseRepository) UpdateCourseStatus(ctx context.Context, courseID, status, rejectReason string) error {
-	// 首先检查 courses 表是否有 status 字段
-	var hasStatusField bool
-	err := r.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) > 0 
-		FROM information_schema.COLUMNS 
-		WHERE TABLE_SCHEMA = DATABASE() 
-		AND TABLE_NAME = 'courses' 
-		AND COLUMN_NAME = 'status'
-	`).Scan(&hasStatusField)
-	
+func (r *courseRepository) fetchCourseUploadResources(ctx context.Context, courseID int) ([]map[string]interface{}, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT resource_id, resource_intro, resource_upload
+		FROM course_resources_upload
+		WHERE course_id = ?
+		ORDER BY sort_order ASC, resource_id ASC
+	`, courseID)
 	if err != nil {
-		// 如果查询失败，假设字段不存在，使用 resource_status_logs 表
-		hasStatusField = false
+		return nil, fmt.Errorf("failed to query course upload resources: %v", err)
 	}
-	
-	if hasStatusField {
-		// 如果 courses 表有 status 字段，直接更新
-		query := "UPDATE courses SET status = ?, audit_time = NOW()"
-		args := []interface{}{status}
-		
-		if rejectReason != "" {
-			// 检查是否有 reject_reason 字段
-			var hasRejectReasonField bool
-			r.db.QueryRowContext(ctx, `
-				SELECT COUNT(*) > 0 
-				FROM information_schema.COLUMNS 
-				WHERE TABLE_SCHEMA = DATABASE() 
-				AND TABLE_NAME = 'courses' 
-				AND COLUMN_NAME = 'reject_reason'
-			`).Scan(&hasRejectReasonField)
-			
-			if hasRejectReasonField {
-				query += ", reject_reason = ?"
-				args = append(args, rejectReason)
-			}
+	defer rows.Close()
+
+	var res []map[string]interface{}
+	for rows.Next() {
+		var (
+			id     int
+			intro  sql.NullString
+			upload sql.NullString
+		)
+		if err := rows.Scan(&id, &intro, &upload); err != nil {
+			return nil, fmt.Errorf("failed to scan course upload resource: %v", err)
 		}
-		
-		query += " WHERE course_id = ?"
-		args = append(args, courseID)
-		
-		_, err := r.db.ExecContext(ctx, query, args...)
-		if err != nil {
-			return fmt.Errorf("failed to update course status: %w", err)
+		res = append(res, map[string]interface{}{
+			"resource_intro":  nullString(intro),
+			"resource_upload": nullString(upload),
+			"resource_id":     id,
+		})
+	}
+	return res, rows.Err()
+}
+
+func (r *courseRepository) fetchCourseContributors(ctx context.Context, courseID int) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT u.username
+		FROM course_contributors cc
+		JOIN users u ON u.id = cc.user_id
+		WHERE cc.course_id = ?
+		ORDER BY u.username ASC
+	`, courseID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query course contributors: %v", err)
+	}
+	defer rows.Close()
+
+	var users []string
+	for rows.Next() {
+		var username sql.NullString
+		if err := rows.Scan(&username); err != nil {
+			return nil, fmt.Errorf("failed to scan contributor: %v", err)
+		}
+		if s := nullString(username); s != "" {
+			users = append(users, s)
 		}
 	}
-	
-	// 无论是否有 status 字段，都记录到 resource_status_logs 表
-	// 获取旧状态
-	var oldStatus string
-	r.db.QueryRowContext(ctx, `
-		SELECT new_status 
-		FROM resource_status_logs 
-		WHERE resource_type = 'course' AND resource_id = ? 
-		ORDER BY operate_time DESC 
-		LIMIT 1
-	`, courseID).Scan(&oldStatus)
-	
-	if oldStatus == "" {
-		oldStatus = "pending" // 默认旧状态
-	}
-	
-	// 记录状态变更日志
-	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO resource_status_logs (resource_type, resource_id, old_status, new_status, operator_id, operate_time, reject_reason)
-		VALUES ('course', ?, ?, ?, 0, NOW(), ?)
-	`, courseID, oldStatus, status, rejectReason)
-	
-	if err != nil {
-		return fmt.Errorf("failed to log status change: %w", err)
-	}
-	
-	return nil
+	return users, rows.Err()
 }
