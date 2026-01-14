@@ -3,8 +3,10 @@ package handler
 import (
 	"net/http"
 	"softeng-platform/internal/service"
+	"softeng-platform/internal/utils"
 	"softeng-platform/pkg/response"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -57,7 +59,20 @@ func (h *CourseHandler) GetCourse(c *gin.Context) {
 	courseID := c.Param("courseId")
 	resourceType := c.Query("resourceType")
 
-	course, err := h.courseService.GetCourse(c.Request.Context(), courseID, resourceType)
+	// 可选鉴权：有 token 则返回 isliked/iscollected + 评论；没 token 也能正常看详情
+	userID := 0
+	authHeader := c.GetHeader("Authorization")
+	if authHeader != "" {
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := utils.ValidateToken(tokenString)
+		if err != nil {
+			response.Error(c, http.StatusUnauthorized, "Invalid token")
+			return
+		}
+		userID = claims.UserID
+	}
+
+	course, err := h.courseService.GetCourse(c.Request.Context(), courseID, resourceType, userID)
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "Course not found")
 		return
@@ -136,8 +151,13 @@ func (h *CourseHandler) AddComment(c *gin.Context) {
 func (h *CourseHandler) DeleteComment(c *gin.Context) {
 	userID := c.GetInt("userID")
 	courseID := c.Param("courseId")
+	commentID := c.Query("commentId")
+	if commentID == "" {
+		commentID = c.Query("comment_id")
+	}
 
-	result, err := h.courseService.DeleteComment(c.Request.Context(), userID, courseID)
+	// 兼容：commentID 为空时，后端会删除该用户在该课程下“最新一条”评论
+	result, err := h.courseService.DeleteComment(c.Request.Context(), userID, courseID, commentID)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return

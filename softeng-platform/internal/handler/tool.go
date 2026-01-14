@@ -3,8 +3,10 @@ package handler
 import (
 	"net/http"
 	"softeng-platform/internal/service"
+	"softeng-platform/internal/utils"
 	"softeng-platform/pkg/response"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -55,7 +57,20 @@ func (h *ToolHandler) GetTool(c *gin.Context) {
 	resourceID := c.Param("resourceId")
 	resourceType := c.Query("resourceType")
 
-	tool, err := h.toolService.GetTool(c.Request.Context(), resourceID, resourceType)
+	// 可选鉴权：有 token 则返回 isliked/iscollected；没 token 也能正常看详情
+	userID := 0
+	authHeader := c.GetHeader("Authorization")
+	if authHeader != "" {
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := utils.ValidateToken(tokenString)
+		if err != nil {
+			response.Error(c, http.StatusUnauthorized, "Invalid token")
+			return
+		}
+		userID = claims.UserID
+	}
+
+	tool, err := h.toolService.GetTool(c.Request.Context(), resourceID, resourceType, userID)
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "Tool not found")
 		return
@@ -188,8 +203,13 @@ func (h *ToolHandler) AddComment(c *gin.Context) {
 func (h *ToolHandler) DeleteComment(c *gin.Context) {
 	userID := c.GetInt("userID")
 	resourceID := c.Param("resourceId")
+	commentID := c.Query("commentId")
+	if commentID == "" {
+		commentID = c.Query("comment_id")
+	}
 
-	result, err := h.toolService.DeleteComment(c.Request.Context(), userID, resourceID)
+	// 兼容：commentID 为空时，后端会删除该用户在该工具下“最新一条”评论
+	result, err := h.toolService.DeleteComment(c.Request.Context(), userID, resourceID, commentID)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return

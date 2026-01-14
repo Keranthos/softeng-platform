@@ -7,12 +7,12 @@ import (
 
 type CourseService interface {
 	GetCourses(ctx context.Context, semester string, category []string, sort string, limit, cursor int, resourceType string) (map[string]interface{}, error)
-	GetCourse(ctx context.Context, courseID, resourceType string) (map[string]interface{}, error)
+	GetCourse(ctx context.Context, courseID, resourceType string, userID int) (map[string]interface{}, error)
 	SearchCourses(ctx context.Context, keyword string, category []string, limit, cursor int, resourceType string) (map[string]interface{}, error)
 	UploadResource(ctx context.Context, userID int, courseID, resourceType string, req CourseUploadRequest) (map[string]interface{}, error)
 	DownloadTextbook(ctx context.Context, courseID, textbookID string) (map[string]interface{}, error)
 	AddComment(ctx context.Context, userID int, courseID, content string) (map[string]interface{}, error)
-	DeleteComment(ctx context.Context, userID int, courseID string) (map[string]interface{}, error)
+	DeleteComment(ctx context.Context, userID int, courseID string, commentID string) (map[string]interface{}, error)
 	ReplyComment(ctx context.Context, userID int, courseID, commentID, content string) (map[string]interface{}, error)
 	DeleteReply(ctx context.Context, userID int, courseID, commentID string) (map[string]interface{}, error)
 	AddView(ctx context.Context, courseID string) (map[string]interface{}, error)
@@ -50,8 +50,8 @@ func (s *courseService) GetCourses(ctx context.Context, semester string, categor
 	}, nil
 }
 
-func (s *courseService) GetCourse(ctx context.Context, courseID, resourceType string) (map[string]interface{}, error) {
-	course, err := s.courseRepo.GetByID(ctx, courseID)
+func (s *courseService) GetCourse(ctx context.Context, courseID, resourceType string, userID int) (map[string]interface{}, error) {
+	course, err := s.courseRepo.GetByID(ctx, courseID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +119,8 @@ func (s *courseService) AddComment(ctx context.Context, userID int, courseID, co
 	}, nil
 }
 
-func (s *courseService) DeleteComment(ctx context.Context, userID int, courseID string) (map[string]interface{}, error) {
-	comment, err := s.courseRepo.DeleteComment(ctx, userID, courseID)
+func (s *courseService) DeleteComment(ctx context.Context, userID int, courseID string, commentID string) (map[string]interface{}, error) {
+	comment, err := s.courseRepo.DeleteComment(ctx, userID, courseID, commentID)
 	if err != nil {
 		return nil, err
 	}

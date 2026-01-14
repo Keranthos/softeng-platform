@@ -9,8 +9,8 @@ import (
 )
 
 type AuthService interface {
-	Register(ctx context.Context, req model.RegisterRequest) (*model.User, error)
-	Login(ctx context.Context, req model.LoginRequest) (*model.User, error)
+	Register(ctx context.Context, req model.RegisterRequest) (string, error)
+	Login(ctx context.Context, req model.LoginRequest) (string, error)
 	ForgotPassword(ctx context.Context, email, newPassword, code string) error
 }
 
@@ -22,32 +22,32 @@ func NewAuthService(userRepo repository.UserRepository) AuthService {
 	return &authService{userRepo: userRepo}
 }
 
-func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (*model.User, error) {
+func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (string, error) {
 	// 检查用户名是否已存在
 	existingUser, _ := s.userRepo.GetByUsername(ctx, req.Username)
 	if existingUser != nil {
-		return nil, errors.New("username already exists")
+		return "", errors.New("username already exists")
 	}
 
 	// 检查邮箱是否已存在
 	existingEmail, _ := s.userRepo.GetByEmail(ctx, req.Email)
 	if existingEmail != nil {
-		return nil, errors.New("email already exists")
+		return "", errors.New("email already exists")
 	}
 
 	// 验证邮箱验证码和邀请码（这里需要实现具体的验证逻辑）
 	if !s.validateEmailCode(req.Email, req.EmailPassword) {
-		return nil, errors.New("invalid email verification code")
+		return "", errors.New("invalid email verification code")
 	}
 
 	if !s.validateCertifyCode(req.CertifyPassword) {
-		return nil, errors.New("invalid invitation code")
+		return "", errors.New("invalid invitation code")
 	}
 
 	// 加密密码
 	hashedPassword, err := utils.HashPassword(req.Password)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	// 创建用户
@@ -61,13 +61,19 @@ func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (
 
 	err = s.userRepo.Create(ctx, user)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return user, nil
+	// 生成 JWT
+	token, err := utils.GenerateToken(user.ID, user.Username, user.Role)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
 }
 
-func (s *authService) Login(ctx context.Context, req model.LoginRequest) (*model.User, error) {
+func (s *authService) Login(ctx context.Context, req model.LoginRequest) (string, error) {
 	var user *model.User
 	var err error
 
@@ -79,15 +85,21 @@ func (s *authService) Login(ctx context.Context, req model.LoginRequest) (*model
 	}
 
 	if err != nil || user == nil {
-		return nil, errors.New("invalid credentials")
+		return "", errors.New("invalid credentials")
 	}
 
 	// 验证密码
 	if !utils.CheckPasswordHash(req.Password, user.Password) {
-		return nil, errors.New("invalid credentials")
+		return "", errors.New("invalid credentials")
 	}
 
-	return user, nil
+	// 生成 JWT
+	token, err := utils.GenerateToken(user.ID, user.Username, user.Role)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
 }
 
 func (s *authService) ForgotPassword(ctx context.Context, email, newPassword, certifyPassword string) error {

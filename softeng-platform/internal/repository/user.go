@@ -69,15 +69,21 @@ func (r *userRepository) GetByID(ctx context.Context, id int) (*model.User, erro
 	`
 
 	user := &model.User{}
+	var (
+		nickname    sql.NullString
+		avatar      sql.NullString
+		description sql.NullString
+		facePhoto   sql.NullString
+	)
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&user.ID,
 		&user.Username,
-		&user.Nickname,
+		&nickname,
 		&user.Email,
 		&user.Password,
-		&user.Avatar,
-		&user.Description,
-		&user.FacePhoto,
+		&avatar,
+		&description,
+		&facePhoto,
 		&user.Role,
 		&user.CreatedAt,
 		&user.UpdatedAt,
@@ -90,6 +96,11 @@ func (r *userRepository) GetByID(ctx context.Context, id int) (*model.User, erro
 		return nil, fmt.Errorf("failed to get user by id: %v", err)
 	}
 
+	user.Nickname = nullStringUser(nickname)
+	user.Avatar = nullStringUser(avatar)
+	user.Description = nullStringUser(description)
+	user.FacePhoto = nullStringUser(facePhoto)
+
 	return user, nil
 }
 
@@ -100,15 +111,21 @@ func (r *userRepository) GetByUsername(ctx context.Context, username string) (*m
 	`
 
 	user := &model.User{}
+	var (
+		nickname    sql.NullString
+		avatar      sql.NullString
+		description sql.NullString
+		facePhoto   sql.NullString
+	)
 	err := r.db.QueryRowContext(ctx, query, username).Scan(
 		&user.ID,
 		&user.Username,
-		&user.Nickname,
+		&nickname,
 		&user.Email,
 		&user.Password,
-		&user.Avatar,
-		&user.Description,
-		&user.FacePhoto,
+		&avatar,
+		&description,
+		&facePhoto,
 		&user.Role,
 		&user.CreatedAt,
 		&user.UpdatedAt,
@@ -121,6 +138,11 @@ func (r *userRepository) GetByUsername(ctx context.Context, username string) (*m
 		return nil, fmt.Errorf("failed to get user by username: %v", err)
 	}
 
+	user.Nickname = nullStringUser(nickname)
+	user.Avatar = nullStringUser(avatar)
+	user.Description = nullStringUser(description)
+	user.FacePhoto = nullStringUser(facePhoto)
+
 	return user, nil
 }
 
@@ -131,15 +153,21 @@ func (r *userRepository) GetByEmail(ctx context.Context, email string) (*model.U
 	`
 
 	user := &model.User{}
+	var (
+		nickname    sql.NullString
+		avatar      sql.NullString
+		description sql.NullString
+		facePhoto   sql.NullString
+	)
 	err := r.db.QueryRowContext(ctx, query, email).Scan(
 		&user.ID,
 		&user.Username,
-		&user.Nickname,
+		&nickname,
 		&user.Email,
 		&user.Password,
-		&user.Avatar,
-		&user.Description,
-		&user.FacePhoto,
+		&avatar,
+		&description,
+		&facePhoto,
 		&user.Role,
 		&user.CreatedAt,
 		&user.UpdatedAt,
@@ -152,7 +180,19 @@ func (r *userRepository) GetByEmail(ctx context.Context, email string) (*model.U
 		return nil, fmt.Errorf("failed to get user by email: %v", err)
 	}
 
+	user.Nickname = nullStringUser(nickname)
+	user.Avatar = nullStringUser(avatar)
+	user.Description = nullStringUser(description)
+	user.FacePhoto = nullStringUser(facePhoto)
+
 	return user, nil
+}
+
+func nullStringUser(ns sql.NullString) string {
+	if ns.Valid {
+		return ns.String
+	}
+	return ""
 }
 
 func (r *userRepository) Update(ctx context.Context, user *model.User) error {
